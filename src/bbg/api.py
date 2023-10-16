@@ -1,201 +1,17 @@
 import atexit
 import logging
-import time
-import warnings
 from abc import ABCMeta, abstractmethod
-from collections import defaultdict, namedtuple
-from datetime import datetime
+from collections import defaultdict
 
 import blpapi
-import numpy as np
 import pandas as pd
-import pytz
 import win32api
 import win32con
-from bbg.util import Name, NonBlockingDelay
+from bbg.util import Parser, Name, NonBlockingDelay
 from blpapi.event import Event
 from dateutil.relativedelta import relativedelta
 
 logger = logging.getLogger(__name__)
-
-
-SecurityErrorAttrs = [Name.SECURITY, Name.SOURCE, Name.CODE, Name.CATEGORY, Name.MESSAGE, Name.SUBCATEGORY]
-SecurityError = namedtuple(Name.SECURITY_ERROR, SecurityErrorAttrs)
-FieldErrorAttrs = [
-    Name.SECURITY,
-    Name.FIELD,
-    Name.SOURCE,
-    Name.CODE,
-    Name.CATEGORY,
-    Name.MESSAGE,
-    Name.SUBCATEGORY,
-]
-FieldError = namedtuple(Name.FIELD_ERROR, FieldErrorAttrs)
-
-UTC = pytz.timezone('UTC')
-GMT = pytz.timezone('GMT')
-EST = pytz.timezone('US/Eastern')
-
-
-class XmlHelper:
-    """Interpreter class for Bloomberg responses"""
-
-    @staticmethod
-    def security_iter(nodearr):
-        """Provide a security data iterator by returning a tuple of (Element, SecurityError) which are mutually exclusive"""
-        assert nodearr.name() == Name.SECURITY_DATA and nodearr.isArray()
-        for i in range(nodearr.numValues()):
-            node = nodearr.getValue(i)
-            err = XmlHelper.get_security_error(node)
-            result = (None, err) if err else (node, None)
-            yield result
-
-    @staticmethod
-    def node_iter(nodearr):
-        assert nodearr.isArray()
-        for i in range(nodearr.numValues()):
-            yield nodearr.getValue(i)
-
-    @staticmethod
-    def message_iter(event):
-        """Provide a message iterator which checks for a response error prior to returning"""
-        for msg in event:
-            logger.info(f'Received response to request {msg.getRequestId()}')
-            logger.debug(msg.toString())
-            if Name.RESPONSE_ERROR in msg:
-                responseError = msg[Name.RESPONSE_ERROR]
-                raise Exception(f'REQUEST FAILED: {responseError}')
-            yield msg
-
-    @staticmethod
-    def get_sequence_value(node):
-        """Convert an element with DataType Sequence to a DataFrame.
-        Note this may be a naive implementation as I assume that bulk data is always a table
-        """
-        assert node.datatype() == 15
-        data = defaultdict(list)
-        cols = []
-        for i in range(node.numValues()):
-            row = node.getValue(i)
-            if i == 0:  # Get the ordered cols and assume they are constant
-                cols = [str(row.getElement(_).name()) for _ in range(row.numElements())]
-
-            for cidx in range(row.numElements()):
-                col = row.getElement(cidx)
-                data[str(col.name())].append(XmlHelper.as_value(col))
-        return pd.DataFrame(data, columns=cols)
-
-    @staticmethod
-    def as_value(ele):
-        """Convert the specified element as a python value"""
-        dtype = ele.datatype()
-        if dtype in (1, 2, 3, 4, 5, 6, 7, 9, 12):
-            # BOOL, CHAR, BYTE, INT32, INT64, FLOAT32, FLOAT64, BYTEARRAY, DECIMAL)
-            try:
-                return ele.getValue()
-            except Exception as exc:
-                print(type(exc))
-                return np.nan
-        if dtype == 8:  # String
-            val = ele.getValue()
-            return str(val)
-        if dtype == 10:  # Date
-            if ele.isNull():
-                return pd.NaT
-            v = ele.getValue()
-            if not v:
-                return pd.NaT
-            dt = datetime(year=v.year, month=v.month, day=v.day)
-            return dt.astimezone(EST)
-        if dtype in (11, 13):  # Datetime
-            if ele.isNull():
-                return pd.NaT
-            v = ele.getValue()
-            now = datetime.now()
-            dt = datetime(year=now.year, month=now.month, day=now.day, hour=v.hour, minute=v.minute, second=v.second)
-            return dt.astimezone(EST)
-        if dtype == 14:  # Enumeration
-            return str(ele.getValue())
-        if dtype == 16:  # Choice
-            raise NotImplementedError('CHOICE data type needs implemented')
-        if dtype == 15:  # SEQUENCE
-            return XmlHelper.get_sequence_value(ele)
-        raise NotImplementedError(f'Unexpected data type {dtype}. Check documentation')
-
-    @staticmethod
-    def get_child_value(parent, name, allow_missing=0):
-        """Return the value of the child element with name in the parent Element"""
-        if not parent.hasElement(name):
-            if allow_missing:
-                return np.nan
-            raise Exception(f'failed to find child element {name} in parent')
-        return XmlHelper.as_value(parent.getElement(name))
-
-    @staticmethod
-    def get_child_values(parent, names):
-        """Return a list of values for the specified child fields. If field not in Element then replace with nan."""
-        vals = []
-        for name in names:
-            if parent.hasElement(name):
-                vals.append(XmlHelper.as_value(parent.getElement(name)))
-            else:
-                vals.append(np.nan)
-        return vals
-
-    @staticmethod
-    def as_security_error(node, secid):
-        """Convert the securityError element to a SecurityError"""
-        assert node.name() == Name.SECURITY_ERROR
-        src = XmlHelper.get_child_value(node, Name.SOURCE)
-        code = XmlHelper.get_child_value(node, Name.CODE)
-        cat = XmlHelper.get_child_value(node, Name.CATEGORY)
-        msg = XmlHelper.get_child_value(node, Name.MESSAGE)
-        subcat = XmlHelper.get_child_value(node, Name.SUBCATEGORY)
-        return SecurityError(security=secid, source=src, code=code, category=cat, message=msg, subcategory=subcat)
-
-    @staticmethod
-    def as_field_error(node, secid):
-        """Convert a fieldExceptions element to a FieldError or FieldError array"""
-        assert node.name() == Name.FIELD_EXCEPTIONS
-        if node.isArray():
-            return [XmlHelper.as_field_error(node.getValue(_), secid) for _ in range(node.numValues())]
-        fld = XmlHelper.get_child_value(node, Name.FIELD_ID)
-        info = node.getElement(Name.ERROR_INFO)
-        src = XmlHelper.get_child_value(info, Name.SOURCE)
-        code = XmlHelper.get_child_value(info, Name.CODE)
-        cat = XmlHelper.get_child_value(info, Name.CATEGORY)
-        msg = XmlHelper.get_child_value(info, Name.MESSAGE)
-        subcat = XmlHelper.get_child_value(info, Name.SUBCATEGORY)
-        return FieldError(
-            security=secid, field=fld, source=src, code=code, category=cat, message=msg, subcategory=subcat
-        )
-
-    @staticmethod
-    def get_security_error(node):
-        """Return a SecurityError if the specified securityData element has one, else return None"""
-        assert node.name() == Name.SECURITY_DATA and not node.isArray()
-        if node.hasElement(Name.SECURITY_ERROR):
-            secid = XmlHelper.get_child_value(node, Name.SECURITY)
-            err = XmlHelper.as_security_error(node.getElement(Name.SECURITY_ERROR), secid)
-            return err
-
-    @staticmethod
-    def get_field_errors(node):
-        """Return a list of FieldErrors if the specified securityData element has field errors"""
-        assert node.name() == Name.SECURITY_DATA and not node.isArray()
-        nodearr = node.getElement(Name.FIELD_EXCEPTIONS)
-        if nodearr.numValues() > 0:
-            secid = XmlHelper.get_child_value(node, Name.SECURITY)
-            errors = XmlHelper.as_field_error(nodearr, secid)
-            return errors
-
-
-def debug_event(event):
-    print(f'unhandled event: {event.EventType}')
-    if event.EventType in [Event.RESPONSE, Event.PARTIAL_RESPONSE]:
-        print('messages:')
-        for msg in XmlHelper.message_iter(event):
-            print(msg.Print)
 
 
 class BaseRequest(metaclass=ABCMeta):
@@ -410,12 +226,12 @@ class HistoricalDataRequest(BaseRequest):
 
     def on_security_data_node(self, node):
         """Process a securityData node - FIXME: currently not handling relateDate node"""
-        sid = XmlHelper.get_child_value(node, Name.SECURITY)
+        sid = Parser.get_child_value(node, Name.SECURITY)
         farr = node.getElement(Name.FIELD_DATA)
         dmap = defaultdict(list)
         for i in range(farr.numValues()):
             pt = farr.getValue(i)
-            [dmap[f].append(XmlHelper.get_child_value(pt, f, allow_missing=1)) for f in ['date'] + self.fields]
+            [dmap[f].append(Parser.get_child_value(pt, f, allow_missing=1)) for f in ['date'] + self.fields]
 
         if not dmap:
             frame = pd.DataFrame(columns=self.fields)
@@ -426,12 +242,12 @@ class HistoricalDataRequest(BaseRequest):
         self.response.on_security_complete(sid, frame)
 
     def process_response(self, event, is_final):
-        for msg in XmlHelper.message_iter(event):
+        for msg in Parser.message_iter(event):
             # Single security element in historical request
             node = msg.getElement(Name.SECURITY_DATA)
             if node.hasElement(Name.SECURITY_ERROR):
-                sid = XmlHelper.get_child_value(node, Name.SECURITY)
-                self.security_errors.append(XmlHelper.as_security_error(node.getElement(Name.SECURITY_ERROR), sid))
+                sid = Parser.get_child_value(node, Name.SECURITY)
+                self.security_errors.append(Parser.as_security_error(node.getElement(Name.SECURITY_ERROR), sid))
             else:
                 self.on_security_data_node(node)
 
@@ -503,20 +319,20 @@ class ReferenceDataRequest(BaseRequest):
         return request
 
     def process_response(self, event, is_final):
-        for msg in XmlHelper.message_iter(event):
-            for node, error in XmlHelper.security_iter(msg.getElement(Name.SECURITY_DATA)):
+        for msg in Parser.message_iter(event):
+            for node, error in Parser.security_iter(msg.getElement(Name.SECURITY_DATA)):
                 if error:
                     self.security_errors.append(error)
                 else:
                     self._process_security_node(node)
 
     def _process_security_node(self, node):
-        sid = XmlHelper.get_child_value(node, Name.SECURITY)
+        sid = Parser.get_child_value(node, Name.SECURITY)
         farr = node.getElement(Name.FIELD_DATA)
-        fdata = XmlHelper.get_child_values(farr, self.fields)
+        fdata = Parser.get_child_values(farr, self.fields)
         assert len(fdata) == len(self.fields), 'field length must match data length'
         self.response.on_security_data(sid, dict(list(zip(self.fields, fdata))))
-        ferrors = XmlHelper.get_field_errors(node)
+        ferrors = Parser.get_field_errors(node)
         ferrors and self.field_errors.extend(ferrors)
 
 
@@ -597,13 +413,13 @@ class IntradayTickRequest(BaseRequest):
 
     def on_tick_data(self, ticks):
         """Process the incoming tick data array"""
-        for tick in XmlHelper.node_iter(ticks):
+        for tick in Parser.node_iter(ticks):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
-            tickmap = {n: XmlHelper.get_child_value(tick, n) for n in names}
+            tickmap = {n: Parser.get_child_value(tick, n) for n in names}
             self.response.ticks.append(tickmap)
 
     def process_response(self, event, is_final):
-        for msg in XmlHelper.message_iter(event):
+        for msg in Parser.message_iter(event):
             tdata = msg.getElement('tickData')
             # tickData will have 0 to 1 tickData[] elements
             if tdata.hasElement('tickData'):
@@ -684,13 +500,13 @@ class IntradayBarRequest(BaseRequest):
 
     def on_bar_data(self, bars):
         """Process the incoming tick data array"""
-        for tick in XmlHelper.node_iter(bars):
+        for tick in Parser.node_iter(bars):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
-            barmap = {n: XmlHelper.get_child_value(tick, n) for n in names}
+            barmap = {n: Parser.get_child_value(tick, n) for n in names}
             self.response.bars.append(barmap)
 
     def process_response(self, event, is_final):
-        for msg in XmlHelper.message_iter(event):
+        for msg in Parser.message_iter(event):
             data = msg.getElement('barData')
             # tickData will have 0 to 1 tickData[] elements
             if data.hasElement('barTickData'):
@@ -750,21 +566,21 @@ class EQSRequest(BaseRequest):
         return request
 
     def process_response(self, event, is_final):
-        for msg in XmlHelper.message_iter(event):
+        for msg in Parser.message_iter(event):
             data = msg.getElement('data')
-            for node, error in XmlHelper.security_iter(data.getElement(Name.SECURITY_DATA)):
+            for node, error in Parser.security_iter(data.getElement(Name.SECURITY_DATA)):
                 if error:
                     self.security_errors.append(error)
                 else:
                     self._process_security_node(node)
 
     def _process_security_node(self, node):
-        sid = XmlHelper.get_child_value(node, Name.SECURITY)
+        sid = Parser.get_child_value(node, Name.SECURITY)
         farr = node.getElement(Name.FIELD_DATA)
         fldnames = [str(farr.getElement(_).name()) for _ in range(farr.numElements())]
-        fdata = XmlHelper.get_child_values(farr, fldnames)
+        fdata = Parser.get_child_values(farr, fldnames)
         self.response.on_security_data(sid, dict(list(zip(fldnames, fdata))))
-        ferrors = XmlHelper.get_field_errors(node)
+        ferrors = Parser.get_field_errors(node)
         ferrors and self.field_errors.extend(ferrors)
 
 
@@ -778,7 +594,7 @@ class Session(blpapi.Session):
     def open_service(self, service_name):
         """Open service. Raise Exception if fails."""
         if not self.openService(service_name):
-            raise Exception(f'Failed to open service {service_name}')
+            raise Exception(f'Failed to open service {service_name}.')
 
     def __cleanup__(self):
         try:
@@ -833,12 +649,12 @@ class SessionFactory:
         event_handler=None,
         event_dispatcher=None,
     ) -> Session:
-        print('Connecting to Bloomberg BBComm session...')
+        logger.info('Connecting to Bloomberg BBComm session...')
         session = create_session(host, port, auth, event_handler, event_dispatcher)
         if not session.start():
-            raise Exception('Failed to create session')
+            raise Exception('Failed to start session.')
         envuser = win32api.GetUserNameEx(win32con.NameSamCompatible)
-        print(f'Connected to Bloomberg BBComm as {envuser}')
+        logger.info(f'Connected to Bloomberg BBComm as {envuser}')
         return session
 
 
@@ -883,12 +699,12 @@ class Context:
             event = self.session.nextEvent(500)  # timeout to gtive the chance to ctrl+c handling
             match event.eventType():
                 case Event.RESPONSE:
-                    logger.info('Processing RESPONSE ...')
+                    logger.debug('Processing RESPONSE ...')
                     request.process_response(event, is_final=True)
-                    logger.info('END RESPONSE')
+                    logger.debug('END RESPONSE')
                     break
                 case Event.PARTIAL_RESPONSE:
-                    logger.info('Processing PARTIAL_RESPONSE ...')
+                    logger.debug('Processing PARTIAL_RESPONSE ...')
                     request.process_response(event, is_final=False)
                 case Event.SESSION_STATUS:
                     try:
@@ -1014,58 +830,41 @@ class Context:
 
 
 class BaseEventHandler(metaclass=ABCMeta):
-    """Base event handler"""
+    """Base Event Handler."""
 
     def __init__(self, topics, fields):
         self.topics = topics
         self.fields = fields
 
-    def __call__(self, event, session):
+    @abstractmethod
+    def emit(self, topic, parsed):
+        """Parsed will be provided by the BaseEventHandler.
+
+        Consists of a tuple: (topic, dictionary of type {field: parsed_value} )
+        """
+
+    def __call__(self, event, _):
         """This method is called from Bloomberg session in a separate thread
         for each incoming event.
         """
         try:
             event_type = event.eventType()
             if event_type == Event.SUBSCRIPTION_DATA:
-                logger.info('next(): subscription data')
-                self.on_data_event(event, session)
+                logger.debug('next(): subscription data')
+                self.__data_event(event, _)
                 return
             if event_type == Event.SUBSCRIPTION_STATUS:
-                logger.info('next(): subscription status')
-                self.on_status_event(event, session)
+                logger.debug('next(): subscription status')
+                self.__status_event(event, _)
                 return
             if event_type == Event.TIMEOUT:
                 return
-            self.on_misc_event(event, session)
+            self.__misc_event(event, _)
         except blpapi.Exception as exception:
-            print(f'Failed to process event {event}: {exception}')
+            logger.error(f'Failed to process event {event}: {exception}')
 
-    @abstractmethod
-    def on_status_event(self, event, _):
-        pass
-
-    @abstractmethod
-    def on_data_event(self, event, _):
-        pass
-
-    @abstractmethod
-    def on_misc_event(self, event, _):
-        pass
-
-
-class LoggingEventHandler(BaseEventHandler):
-    """Default event handler"""
-
-    def __init__(self, topics, fields, override={}):
-        super().__init__(topics, fields)
-        self.override = override
-        # create dataframe grid
-        nrows, ncols = len(self.topics), len(self.fields)
-        vals = np.repeat(np.nan, nrows * ncols).reshape((nrows, ncols))
-        self.frame = pd.DataFrame(vals, columns=self.fields, index=[self.override.get(t, t) for t in self.topics])
-
-    def on_status_event(self, event, session):
-        for msg in XmlHelper.message_iter(event):
+    def __status_event(self, event, _):
+        for msg in Parser.message_iter(event):
             topic = msg.correlationId().value()
             match msg.messageType():
                 case Name.SUBSCRIPTION_FAILURE:
@@ -1073,25 +872,24 @@ class LoggingEventHandler(BaseEventHandler):
                     raise Exception(f'Subscription failed topic={topic} desc={desc}')
                 case Name.SUBSCRIPTION_TERMINATED:
                     # Subscription can be terminated if the session identity is revoked.
-                    print(f'Subscription for {topic} TERMINATED')
+                    logger.error(f'Subscription for {topic} TERMINATED')
 
-    def on_data_event(self, event, session):
-        for msg in XmlHelper.message_iter(event):
+    def __data_event(self, event, _):
+        """Return a full mapping of fields to parsed values"""
+        for msg in Parser.message_iter(event):
+            parsed = {}
             topic = msg.correlationId().value()
-            print(f'Received event for {get_timestamp()}: {self.override.get(topic, topic)}')
-            ridx = self.topics.index(topic)
-            for cidx, field in enumerate(self.fields):
+            for field in self.fields:
                 if field.upper() in msg:
-                    val = XmlHelper.get_child_value(msg, field.upper())
-                    with warnings.catch_warnings():
-                        warnings.simplefilter(action='ignore', category=FutureWarning)
-                        self.frame.iloc[ridx, cidx] = val
+                    val = Parser.get_child_value(msg, field.upper())
+                    parsed[field] = val
+            self.emit(topic, parsed)
 
-    def on_misc_event(self, event, _):
+    def __misc_event(self, event, _):
         for msg in event:
             match msg.messageType():
                 case Name.SLOW_CONSUMER_WARNING:
-                    print(
+                    logger.warning(
                         f'{Name.SLOW_CONSUMER_WARNING} - The event queue is '
                         + 'beginning to approach its maximum capacity and '
                         + 'the application is not processing the data fast '
@@ -1099,7 +897,7 @@ class LoggingEventHandler(BaseEventHandler):
                         + ' (DataLoss).\n'
                     )
                 case Name.SLOW_CONSUMER_WARNING_CLEARED:
-                    print(
+                    logger.warning(
                         f'{Name.SLOW_CONSUMER_WARNING_CLEARED} - the event '
                         + 'queue has shrunk enough that there is no '
                         + 'longer any immediate danger of overflowing the '
@@ -1108,9 +906,9 @@ class LoggingEventHandler(BaseEventHandler):
                         + 'it is now safe to continue as normal.\n'
                     )
                 case Name.DATA_LOSS:
-                    print(msg)
+                    logger.warning(msg)
                     topic = msg.correlationId().value()
-                    print(
+                    logger.warning(
                         f'{Name.DATA_LOSS} - The application is too slow to '
                         + 'process events and the event queue is overflowing. '
                         + f'Data is lost for topic {topic}.\n'
@@ -1120,7 +918,14 @@ class LoggingEventHandler(BaseEventHandler):
                     # should be handled as the session can be terminated,
                     # e.g. session identity can be revoked at a later
                     # time, which terminates the session.
-                    print('Session terminated')
+                    logger.error('Session terminated')
+
+
+class ExampleEventHandler(BaseEventHandler):
+    """Primitive event handler."""
+
+    def emit(self, topic, parsed):
+        logger.info(f'{topic}: {parsed}')
 
 
 class Subscription:
@@ -1149,12 +954,7 @@ class Subscription:
         self.auth = auth
         self.dispatcher = dispatcher
 
-    def subscribe(
-        self,
-        runtime=24 * 60 * 60,
-        handler=LoggingEventHandler,
-        override={},
-    ):
+    def subscribe(self, handler: BaseEventHandler = ExampleEventHandler, runtime=24 * 60 * 60, *args, **kwargs):
         """Form of created subscription string (subscriptions.add):
 
         "//blp/mktdata/ticker/IBM US Equity?fields=BID,ASK&interval=2"
@@ -1164,7 +964,7 @@ class Subscription:
 
         handler: async handler of events: primary driver of event routing.
         """
-        _handler = handler(self.topics, self.fields, override=override)
+        _handler = handler(self.topics, self.fields, *args, **kwargs)
         session = SessionFactory.create(self.host, self.port, self.auth, _handler, self.dispatcher)
         session.open_service('//blp/mktdata')
 
@@ -1180,10 +980,6 @@ class Subscription:
         while not _runtime.timeout():
             continue
 
-        print('Subscription runtime expired. Unsubscribing...')
+        logger.warning('Subscription runtime expired. Unsubscribing...')
 
         session.unsubscribe(subscriptions)
-
-
-def get_timestamp():
-    return time.strftime('%Y/%m/%d %X')
