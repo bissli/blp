@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "bbg"
+version = "0.0.1"
+description = "Simple blpapi wrapper"
+authors = ["bissli <bissli@xyz.com>"]
+
+[tool.poetry.dependencies]
+python = "~3.11"
+
+blpapi = "^3.19.3"
+pandas = "^1.3.5"
+pywin32 = "^303"
+
+[tool.poetry.dev-dependencies]
+bump2version = "^1.0.1"
+pytest = "^6.2.5"
+
+[[tool.poetry.source]]
+name = "blpapi"
+url = "https://bcms.bloomberg.com/pip/simple"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
