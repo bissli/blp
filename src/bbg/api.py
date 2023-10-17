@@ -2,16 +2,27 @@ import atexit
 import logging
 from abc import ABCMeta, abstractmethod
 from collections import defaultdict
+from collections.abc import Iterable
 
 import blpapi
+import numpy as np
 import pandas as pd
 import win32api
 import win32con
-from bbg.util import Parser, Name, NonBlockingDelay
+from bbg.util import Name, NonBlockingDelay, Parser
 from blpapi.event import Event
 from dateutil.relativedelta import relativedelta
 
 logger = logging.getLogger(__name__)
+
+
+def empty(obj):
+    if isinstance(obj, Iterable):
+        try:
+            return np.all(obj.isnull())
+        except:
+            return bool(obj)
+    return bool(obj)
 
 
 class BaseRequest(metaclass=ABCMeta):
@@ -31,19 +42,21 @@ class BaseRequest(metaclass=ABCMeta):
 
     @property
     def has_exception(self):
-        if not self.ignore_security_error and len(self.security_errors) > 0:
-            return True
-        if not self.ignore_field_error and len(self.field_errors) > 0:
-            return True
+        return (not self.ignore_security_error and self.security_errors) or (
+            not self.ignore_field_error and self.field_errors
+        )
 
     def raise_exception(self):
-        if not self.ignore_security_error and len(self.security_errors) > 0:
-            msgs = [f'({s.security}, {s.category}, {s.message})' for s in self.security_errors]
-            raise Exception(f"SecurityError: {','.join(msgs)}")
-        if not self.ignore_field_error and len(self.field_errors) > 0:
-            msgs = [f'({s.security}, {s.field}, {s.category}, {s.message})' for s in self.field_errors]
-            raise Exception(f"FieldError: {','.join(msgs)}")
-        raise Exception('Programmer Error: No exception to raise')
+        if self.security_errors:
+            msgs = ''.join([str(s) for s in self.security_errors])
+            if not self.ignore_security_error:
+                raise Exception(msgs)
+            logger.debug('Security Errors:\n' + msgs)
+        if self.field_errors:
+            msgs = ''.join([str(s) for s in self.field_errors])
+            if not self.ignore_field_error:
+                raise Exception(msgs)
+            logger.debug('Field Errors:\n' + msgs)
 
     @abstractmethod
     def create_request(self, service):
@@ -57,9 +70,9 @@ class BaseRequest(metaclass=ABCMeta):
         for msg in event:
             if msg.messageType() == Name.SESSION_CONNECTION_UP:
                 logger.info('Connected ...')
-            elif msg.hasElement(Name.SESSION_STARTED):
+            elif Name.SESSION_STARTED in msg:
                 logger.info('Started new Bbg session ...')
-            elif msg.hasElement('ServiceOpened'):
+            elif 'ServiceOpened' in msg:
                 logger.info('Opened Bbg service ...')
             elif msg.messageType() == 'SessionTerminated':
                 logger.info('Session DONE')
@@ -168,8 +181,8 @@ class HistoricalDataRequest(BaseRequest):
         self.is_single_field = is_single_field = isinstance(fields, str)
         self.sids = is_single_sid and [sids] or list(sids)
         self.fields = is_single_field and [fields] or list(fields)
-        self.end = end = pd.to_datetime(end) if end else pd.Timestamp.now()
-        self.start = pd.to_datetime(start) if start else end + relativedelta(years=-1)
+        self.end = end = pd.to_datetime(end) if empty(end) else pd.Timestamp.now()
+        self.start = pd.to_datetime(start) if empty(start) else end + relativedelta(years=-1)
         self.period = period
         self.period_adjustment = period_adjustment
         self.currency = currency
@@ -227,11 +240,10 @@ class HistoricalDataRequest(BaseRequest):
     def on_security_data_node(self, node):
         """Process a securityData node - FIXME: currently not handling relateDate node"""
         sid = Parser.get_child_value(node, Name.SECURITY)
-        farr = node.getElement(Name.FIELD_DATA)
+        fields = node.getElement(Name.FIELD_DATA)
         dmap = defaultdict(list)
-        for i in range(farr.numValues()):
-            pt = farr.getValue(i)
-            [dmap[f].append(Parser.get_child_value(pt, f, allow_missing=1)) for f in ['date'] + self.fields]
+        for pt in fields.values():
+            [dmap[f].append(Parser.get_child_value(pt, f)) for f in ['date'] + self.fields]
 
         if not dmap:
             frame = pd.DataFrame(columns=self.fields)
@@ -245,7 +257,7 @@ class HistoricalDataRequest(BaseRequest):
         for msg in Parser.message_iter(event):
             # Single security element in historical request
             node = msg.getElement(Name.SECURITY_DATA)
-            if node.hasElement(Name.SECURITY_ERROR):
+            if Name.SECURITY_ERROR in node:
                 sid = Parser.get_child_value(node, Name.SECURITY)
                 self.security_errors.append(Parser.as_security_error(node.getElement(Name.SECURITY_ERROR), sid))
             else:
@@ -320,20 +332,20 @@ class ReferenceDataRequest(BaseRequest):
 
     def process_response(self, event, is_final):
         for msg in Parser.message_iter(event):
-            for node, error in Parser.security_iter(msg.getElement(Name.SECURITY_DATA)):
-                if error:
-                    self.security_errors.append(error)
-                else:
-                    self._process_security_node(node)
+            for node, err in Parser.security_iter(msg.getElement(Name.SECURITY_DATA)):
+                if err:
+                    self.security_errors.append(err)
+                    continue
+                self._process_security_node(node)
 
     def _process_security_node(self, node):
         sid = Parser.get_child_value(node, Name.SECURITY)
-        farr = node.getElement(Name.FIELD_DATA)
-        fdata = Parser.get_child_values(farr, self.fields)
-        assert len(fdata) == len(self.fields), 'field length must match data length'
-        self.response.on_security_data(sid, dict(list(zip(self.fields, fdata))))
-        ferrors = Parser.get_field_errors(node)
-        ferrors and self.field_errors.extend(ferrors)
+        fields = node.getElement(Name.FIELD_DATA)
+        field_data = Parser.get_child_values(fields, self.fields)
+        assert len(field_data) == len(self.fields), 'Field length must match data length'
+        self.response.on_security_data(sid, dict(list(zip(self.fields, field_data))))
+        field_errors = Parser.get_field_errors(node)
+        field_errors and self.field_errors.extend(field_errors)
 
 
 class IntradayTickResponse(BaseResponse):
@@ -422,7 +434,7 @@ class IntradayTickRequest(BaseRequest):
         for msg in Parser.message_iter(event):
             tdata = msg.getElement('tickData')
             # tickData will have 0 to 1 tickData[] elements
-            if tdata.hasElement('tickData'):
+            if 'tickData' in tdata:
                 self.on_tick_data(tdata.getElement('tickData'))
 
 
@@ -509,7 +521,7 @@ class IntradayBarRequest(BaseRequest):
         for msg in Parser.message_iter(event):
             data = msg.getElement('barData')
             # tickData will have 0 to 1 tickData[] elements
-            if data.hasElement('barTickData'):
+            if 'barTickData' in data:
                 self.on_bar_data(data.getElement('barTickData'))
 
 
@@ -568,17 +580,18 @@ class EQSRequest(BaseRequest):
     def process_response(self, event, is_final):
         for msg in Parser.message_iter(event):
             data = msg.getElement('data')
-            for node, error in Parser.security_iter(data.getElement(Name.SECURITY_DATA)):
+            security = data.getElement(Name.SECURITY_DATA)
+            for node, error in Parser.security_iter(security):
                 if error:
                     self.security_errors.append(error)
-                else:
-                    self._process_security_node(node)
+                    continue
+                self._process_security_node(node)
 
     def _process_security_node(self, node):
         sid = Parser.get_child_value(node, Name.SECURITY)
-        farr = node.getElement(Name.FIELD_DATA)
-        fldnames = [str(farr.getElement(_).name()) for _ in range(farr.numElements())]
-        fdata = Parser.get_child_values(farr, fldnames)
+        fields = node.getElement(Name.FIELD_DATA)
+        fldnames = [str(field.name()) for field in fields.elements()]
+        fdata = Parser.get_child_values(fields, fldnames)
         self.response.on_security_data(sid, dict(list(zip(fldnames, fdata))))
         ferrors = Parser.get_field_errors(node)
         ferrors and self.field_errors.extend(ferrors)
@@ -739,7 +752,14 @@ class Context:
         )
         return self.execute(req)
 
-    def get_reference_data(self, sids, flds, ignore_security_error=False, ignore_field_error=False, **overrides):
+    def get_reference_data(
+        self,
+        sids,
+        flds,
+        ignore_security_error=False,
+        ignore_field_error=False,
+        **overrides,
+    ):
         req = ReferenceDataRequest(
             sids,
             flds,
