@@ -1,3 +1,6 @@
+"""TODO: Standardize: Response always stores dataframes (cleaned for values_to_string). to_dictionary returns DF to dictionary.
+See HistoricalDataResponse
+"""
 import atexit
 import logging
 from abc import ABCMeta, abstractmethod
@@ -28,12 +31,19 @@ def empty(obj):
 class BaseRequest(metaclass=ABCMeta):
     """Base Request Object"""
 
-    def __init__(self, service_name, ignore_security_error=False, ignore_field_error=False):
+    def __init__(
+        self,
+        service_name,
+        ignore_security_error=False,
+        ignore_field_error=False,
+        values_as_string=False,
+    ):
         self.field_errors = []
         self.security_errors = []
         self.ignore_security_error = ignore_security_error
         self.ignore_field_error = ignore_field_error
         self.service_name = service_name
+        self.parser = Parser(values_as_string=values_as_string)
         self.response = None
 
     @abstractmethod
@@ -101,7 +111,7 @@ class BaseResponse(metaclass=ABCMeta):
     """Base class for Responses"""
 
     @abstractmethod
-    def as_frame(self):
+    def as_dataframe(self):
         pass
 
 
@@ -111,12 +121,14 @@ class HistoricalDataResponse(BaseResponse):
         self.response_map = {}
 
     def on_security_complete(self, sid, frame):
-        self.response_map[sid] = frame
+        self.response_map[sid] = (
+            frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
+        )
 
-    def as_map(self):
+    def as_dictionary(self):
         return self.response_map
 
-    def as_frame(self):
+    def as_dataframe(self):
         """:return: Multi-Index DataFrame"""
         sids, frames = list(self.response_map.keys()), list(self.response_map.values())
         frame = pd.concat(frames, keys=sids, axis=1)
@@ -156,6 +168,7 @@ class HistoricalDataRequest(BaseRequest):
         period=None,
         ignore_security_error=False,
         ignore_field_error=False,
+        values_as_string=False,
         period_adjustment=None,
         currency=None,
         override_option=None,
@@ -174,6 +187,7 @@ class HistoricalDataRequest(BaseRequest):
             '//blp/refdata',
             ignore_security_error=ignore_security_error,
             ignore_field_error=ignore_field_error,
+            values_as_string=values_as_string,
         )
         period = period or 'DAILY'
         assert period in ('DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'SEMI_ANNUALLY', 'YEARLY')
@@ -239,11 +253,11 @@ class HistoricalDataRequest(BaseRequest):
 
     def on_security_data_node(self, node):
         """Process a securityData node - FIXME: currently not handling relateDate node"""
-        sid = Parser.get_child_value(node, Name.SECURITY)
+        sid = self.parser.get_child_value(node, Name.SECURITY)
         fields = node.getElement(Name.FIELD_DATA)
         dmap = defaultdict(list)
         for pt in fields.values():
-            [dmap[f].append(Parser.get_child_value(pt, f)) for f in ['date'] + self.fields]
+            [dmap[f].append(self.parser.get_child_value(pt, f)) for f in ['date'] + self.fields]
 
         if not dmap:
             frame = pd.DataFrame(columns=self.fields)
@@ -254,12 +268,12 @@ class HistoricalDataRequest(BaseRequest):
         self.response.on_security_complete(sid, frame)
 
     def process_response(self, event, is_final):
-        for msg in Parser.message_iter(event):
+        for msg in self.parser.message_iter(event):
             # Single security element in historical request
             node = msg.getElement(Name.SECURITY_DATA)
             if Name.SECURITY_ERROR in node:
-                sid = Parser.get_child_value(node, Name.SECURITY)
-                self.security_errors.append(Parser.as_security_error(node.getElement(Name.SECURITY_ERROR), sid))
+                sid = self.parser.get_child_value(node, Name.SECURITY)
+                self.security_errors.append(self.parser.as_security_error(node.getElement(Name.SECURITY_ERROR), sid))
             else:
                 self.on_security_data_node(node)
 
@@ -272,16 +286,16 @@ class ReferenceDataResponse(BaseResponse):
     def on_security_data(self, sid, fieldmap):
         self.response_map[sid].update(fieldmap)
 
-    def as_map(self):
+    def as_dictionary(self):
         return self.response_map
 
-    def as_frame(self):
+    def as_dataframe(self):
         """:return: Multi-Index DataFrame"""
         data = {sid: pd.Series(data) for sid, data in self.response_map.items()}
         frame = pd.DataFrame.from_dict(data, orient='index')
         # layer in any missing fields just in case
         frame = frame.reindex(self.request.fields, axis=1)
-        return frame
+        return frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
 
 
 class ReferenceDataRequest(BaseRequest):
@@ -293,6 +307,7 @@ class ReferenceDataRequest(BaseRequest):
         ignore_field_error=False,
         return_formatted_value=None,
         use_utc_time=None,
+        values_as_string=False,
         **overrides,
     ):
         """response_type: (frame, map) how to return the results"""
@@ -300,6 +315,7 @@ class ReferenceDataRequest(BaseRequest):
             '//blp/refdata',
             ignore_security_error=ignore_security_error,
             ignore_field_error=ignore_field_error,
+            values_as_string=values_as_string,
         )
         self.is_single_sid = is_single_sid = isinstance(sids, str)
         self.is_single_field = is_single_field = isinstance(fields, str)
@@ -331,20 +347,20 @@ class ReferenceDataRequest(BaseRequest):
         return request
 
     def process_response(self, event, is_final):
-        for msg in Parser.message_iter(event):
-            for node, err in Parser.security_iter(msg.getElement(Name.SECURITY_DATA)):
+        for msg in self.parser.message_iter(event):
+            for node, err in self.parser.security_iter(msg.getElement(Name.SECURITY_DATA)):
                 if err:
                     self.security_errors.append(err)
                     continue
                 self._process_security_node(node)
 
     def _process_security_node(self, node):
-        sid = Parser.get_child_value(node, Name.SECURITY)
+        sid = self.parser.get_child_value(node, Name.SECURITY)
         fields = node.getElement(Name.FIELD_DATA)
-        field_data = Parser.get_child_values(fields, self.fields)
+        field_data = self.parser.get_child_values(fields, self.fields)
         assert len(field_data) == len(self.fields), 'Field length must match data length'
         self.response.on_security_data(sid, dict(list(zip(self.fields, field_data))))
-        field_errors = Parser.get_field_errors(node)
+        field_errors = self.parser.get_field_errors(node)
         field_errors and self.field_errors.extend(field_errors)
 
 
@@ -353,9 +369,10 @@ class IntradayTickResponse(BaseResponse):
         self.request = request
         self.ticks = []  # array of dicts
 
-    def as_frame(self):
+    def as_dataframe(self):
         """Return a data frame with no set index"""
-        return pd.DataFrame.from_records(self.ticks)
+        frame = pd.DataFrame.from_records(self.ticks)
+        return frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
 
 
 class IntradayTickRequest(BaseRequest):
@@ -425,13 +442,13 @@ class IntradayTickRequest(BaseRequest):
 
     def on_tick_data(self, ticks):
         """Process the incoming tick data array"""
-        for tick in Parser.node_iter(ticks):
+        for tick in self.parser.node_iter(ticks):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
-            tickmap = {n: Parser.get_child_value(tick, n) for n in names}
+            tickmap = {n: self.parser.get_child_value(tick, n) for n in names}
             self.response.ticks.append(tickmap)
 
     def process_response(self, event, is_final):
-        for msg in Parser.message_iter(event):
+        for msg in self.parser.message_iter(event):
             tdata = msg.getElement('tickData')
             # tickData will have 0 to 1 tickData[] elements
             if 'tickData' in tdata:
@@ -441,10 +458,11 @@ class IntradayTickRequest(BaseRequest):
 class IntradayBarResponse(BaseResponse):
     def __init__(self, request):
         self.request = request
-        self.bars = []  # array of dicts
+        self.bars = []  # iterdict
 
-    def as_frame(self):
-        return pd.DataFrame.from_records(self.bars)
+    def as_dataframe(self):
+        frame = pd.DataFrame.from_records(self.bars)
+        return frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
 
 
 class IntradayBarRequest(BaseRequest):
@@ -512,13 +530,13 @@ class IntradayBarRequest(BaseRequest):
 
     def on_bar_data(self, bars):
         """Process the incoming tick data array"""
-        for tick in Parser.node_iter(bars):
+        for tick in self.parser.node_iter(bars):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
-            barmap = {n: Parser.get_child_value(tick, n) for n in names}
+            barmap = {n: self.parser.get_child_value(tick, n) for n in names}
             self.response.bars.append(barmap)
 
     def process_response(self, event, is_final):
-        for msg in Parser.message_iter(event):
+        for msg in self.parser.message_iter(event):
             data = msg.getElement('barData')
             # tickData will have 0 to 1 tickData[] elements
             if 'barTickData' in data:
@@ -533,18 +551,19 @@ class EQSResponse(BaseResponse):
     def on_security_data(self, sid, fieldmap):
         self.response_map[sid].update(fieldmap)
 
-    def as_map(self):
+    def as_dictionary(self):
         return self.response_map
 
-    def as_frame(self):
+    def as_dataframe(self):
         """:return: Multi-Index DataFrame"""
         data = {sid: pd.Series(data) for sid, data in self.response_map.items()}
-        return pd.DataFrame.from_dict(data, orient='index')
+        frame = pd.DataFrame.from_dict(data, orient='index')
+        return frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
 
 
 class EQSRequest(BaseRequest):
     def __init__(self, name, type='GLOBAL', group='General', asof=None, language=None):
-        super(EQSRequest, self).__init__('//blp/refdata')
+        super().__init__('//blp/refdata')
         self.name = name
         self.group = group
         self.type = type
@@ -578,22 +597,22 @@ class EQSRequest(BaseRequest):
         return request
 
     def process_response(self, event, is_final):
-        for msg in Parser.message_iter(event):
+        for msg in self.parser.message_iter(event):
             data = msg.getElement('data')
             security = data.getElement(Name.SECURITY_DATA)
-            for node, error in Parser.security_iter(security):
+            for node, error in self.parser.security_iter(security):
                 if error:
                     self.security_errors.append(error)
                     continue
                 self._process_security_node(node)
 
     def _process_security_node(self, node):
-        sid = Parser.get_child_value(node, Name.SECURITY)
+        sid = self.parser.get_child_value(node, Name.SECURITY)
         fields = node.getElement(Name.FIELD_DATA)
         fldnames = [str(field.name()) for field in fields.elements()]
-        fdata = Parser.get_child_values(fields, fldnames)
+        fdata = self.parser.get_child_values(fields, fldnames)
         self.response.on_security_data(sid, dict(list(zip(fldnames, fdata))))
-        ferrors = Parser.get_field_errors(node)
+        ferrors = self.parser.get_field_errors(node)
         ferrors and self.field_errors.extend(ferrors)
 
 
@@ -852,9 +871,10 @@ class Context:
 class BaseEventHandler(metaclass=ABCMeta):
     """Base Event Handler."""
 
-    def __init__(self, topics, fields):
+    def __init__(self, topics, fields, parser=None):
         self.topics = topics
         self.fields = fields
+        self.parser = parser or Parser()
 
     @abstractmethod
     def emit(self, topic, parsed):
@@ -884,7 +904,7 @@ class BaseEventHandler(metaclass=ABCMeta):
             logger.error(f'Failed to process event {event}: {exception}')
 
     def __status_event(self, event, _):
-        for msg in Parser.message_iter(event):
+        for msg in self.parser.message_iter(event):
             topic = msg.correlationId().value()
             match msg.messageType():
                 case Name.SUBSCRIPTION_FAILURE:
@@ -896,12 +916,12 @@ class BaseEventHandler(metaclass=ABCMeta):
 
     def __data_event(self, event, _):
         """Return a full mapping of fields to parsed values"""
-        for msg in Parser.message_iter(event):
+        for msg in self.parser.message_iter(event):
             parsed = {}
             topic = msg.correlationId().value()
             for field in self.fields:
                 if field.upper() in msg:
-                    val = Parser.get_child_value(msg, field.upper())
+                    val = self.parser.get_child_value(msg, field.upper())
                     parsed[field] = val
             self.emit(topic, parsed)
 

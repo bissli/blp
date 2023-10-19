@@ -17,13 +17,13 @@ if __name__ == '__main__':
 
     banner('ReferenceDataRequest: single security, single field, frame response')
     response = service.get_reference_data('msft us equity', 'px_last')
-    print(response.as_map())
-    print(response.as_frame())
+    print(response.as_dictionary())
+    print(response.as_dataframe())
 
     banner('ReferenceDataRequest: single security, multi-field (with bulk), frame response')
     response = service.get_reference_data('eurusd curncy', ['px_last', 'fwd_curve'])
-    print(response.as_map())
-    rframe = response.as_frame()
+    print(response.as_dictionary())
+    rframe = response.as_dataframe()
     print(rframe.columns)
     # show frame within a frame
     print(rframe['fwd_curve'].iloc[0].tail())
@@ -32,19 +32,19 @@ if __name__ == '__main__':
     response = service.get_reference_data(
         ['eurusd curncy', 'msft us equity'], ['px_last', 'fwd_curve'], ignore_field_error=1
     )
-    print(response.as_frame()['fwd_curve']['eurusd curncy'])
+    print(response.as_dataframe()['fwd_curve']['eurusd curncy'])
 
     banner('HistoricalDataRequest: multi security, multi-field, daily data')
     response = service.get_historical(['eurusd curncy', 'msft us equity'], ['px_last', 'px_open'], start=d)
-    print(response.as_map())
-    print(response.as_frame().head(5))
+    print(response.as_dictionary())
+    print(response.as_dataframe().head(5))
 
     banner('HistoricalDataRequest: multi security, multi-field, weekly data')
     response = service.get_historical(
         ['eurusd curncy', 'msft us equity'], ['px_last', 'px_open'], start=m, period='WEEKLY'
     )
     print('--------- AS SINGLE TABLE ----------')
-    print(response.as_frame().head(5))
+    print(response.as_dataframe().head(5))
 
     #
     # HOW TO
