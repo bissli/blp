@@ -34,14 +34,14 @@ class BaseRequest(metaclass=ABCMeta):
     def __init__(
         self,
         service_name,
-        ignore_security_error=False,
-        ignore_field_error=False,
+        raise_security_error=False,
+        raise_field_error=False,
         values_as_string=False,
     ):
         self.field_errors = []
         self.security_errors = []
-        self.ignore_security_error = ignore_security_error
-        self.ignore_field_error = ignore_field_error
+        self.raise_security_error = raise_security_error
+        self.raise_field_error = raise_field_error
         self.service_name = service_name
         self.parser = Parser(values_as_string=values_as_string)
         self.response = None
@@ -52,19 +52,17 @@ class BaseRequest(metaclass=ABCMeta):
 
     @property
     def has_exception(self):
-        return (not self.ignore_security_error and self.security_errors) or (
-            not self.ignore_field_error and self.field_errors
-        )
+        return (self.raise_security_error and self.security_errors) or (self.raise_field_error and self.field_errors)
 
     def raise_exception(self):
         if self.security_errors:
             msgs = ''.join([str(s) for s in self.security_errors])
-            if not self.ignore_security_error:
+            if self.raise_security_error:
                 raise Exception(msgs)
             logger.debug('Security Errors:\n' + msgs)
         if self.field_errors:
             msgs = ''.join([str(s) for s in self.field_errors])
-            if not self.ignore_field_error:
+            if self.raise_field_error:
                 raise Exception(msgs)
             logger.debug('Field Errors:\n' + msgs)
 
@@ -146,8 +144,8 @@ class HistoricalDataRequest(BaseRequest):
     start: (optional) date, date string , or None. If None, defaults to 1 year ago.
     end: (optional) date, date string, or None. If None, defaults to today.
     period: (optional) periodicity of data [DAILY, WEEKLY, MONTHLY, QUARTERLY, SEMI_ANNUALLY, YEARLY]
-    ignore_security_error: If True, ignore exceptions caused by invalid sids
-    ignore_field_error: If True, ignore exceptions caused by invalid fields
+    raise_security_error: If True, raise exceptions caused by invalid sids
+    raise_field_error: If True, raise exceptions caused by invalid fields
     period_adjustment: (ACTUAL, CALENDAR, FISCAL)
                         Set the frequency and calendar type of the output
     currency: ISO Code
@@ -166,8 +164,8 @@ class HistoricalDataRequest(BaseRequest):
         start=None,
         end=None,
         period=None,
-        ignore_security_error=False,
-        ignore_field_error=False,
+        raise_security_error=False,
+        raise_field_error=False,
         values_as_string=False,
         period_adjustment=None,
         currency=None,
@@ -185,8 +183,8 @@ class HistoricalDataRequest(BaseRequest):
     ):
         super().__init__(
             '//blp/refdata',
-            ignore_security_error=ignore_security_error,
-            ignore_field_error=ignore_field_error,
+            raise_security_error=raise_security_error,
+            raise_field_error=raise_field_error,
             values_as_string=values_as_string,
         )
         period = period or 'DAILY'
@@ -303,8 +301,8 @@ class ReferenceDataRequest(BaseRequest):
         self,
         sids,
         fields,
-        ignore_security_error=False,
-        ignore_field_error=False,
+        raise_security_error=False,
+        raise_field_error=False,
         return_formatted_value=None,
         use_utc_time=None,
         values_as_string=False,
@@ -313,8 +311,8 @@ class ReferenceDataRequest(BaseRequest):
         """response_type: (frame, map) how to return the results"""
         super().__init__(
             '//blp/refdata',
-            ignore_security_error=ignore_security_error,
-            ignore_field_error=ignore_field_error,
+            raise_security_error=raise_security_error,
+            raise_field_error=raise_field_error,
             values_as_string=values_as_string,
         )
         self.is_single_sid = is_single_sid = isinstance(sids, str)
@@ -699,7 +697,7 @@ class Context:
         self.host = host
         self.port = port
         self.auth = auth
-        self.session = session and session or SessionFactory.create(host, port, auth)
+        self.session = session or SessionFactory.create(host, port, auth)
 
     def __repr__(self):
         fmtargs = {
@@ -755,8 +753,8 @@ class Context:
         start=None,
         end=None,
         period=None,
-        ignore_security_error=False,
-        ignore_field_error=False,
+        raise_security_error=False,
+        raise_field_error=False,
         **overrides,
     ):
         req = HistoricalDataRequest(
@@ -765,8 +763,8 @@ class Context:
             start=start,
             end=end,
             period=period,
-            ignore_security_error=ignore_security_error,
-            ignore_field_error=ignore_field_error,
+            raise_security_error=raise_security_error,
+            raise_field_error=raise_field_error,
             **overrides,
         )
         return self.execute(req)
@@ -775,15 +773,15 @@ class Context:
         self,
         sids,
         flds,
-        ignore_security_error=False,
-        ignore_field_error=False,
+        raise_security_error=False,
+        raise_field_error=False,
         **overrides,
     ):
         req = ReferenceDataRequest(
             sids,
             flds,
-            ignore_security_error=ignore_security_error,
-            ignore_field_error=ignore_field_error,
+            raise_security_error=raise_security_error,
+            raise_field_error=raise_field_error,
             **overrides,
         )
         return self.execute(req)
