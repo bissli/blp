@@ -15,10 +15,9 @@ logger = logging.getLogger(__name__)
 class BaseEventHandler(metaclass=ABCMeta):
     """Base Event Handler."""
 
-    def __init__(self, topics, fields, parser: Parser = None):
+    def __init__(self, topics, fields):
         self.topics = topics
         self.fields = fields
-        self.parser = parser or Parser()
 
     @abstractmethod
     def emit(self, topic, parsed):
@@ -48,11 +47,11 @@ class BaseEventHandler(metaclass=ABCMeta):
             logger.error(f'Failed to process event {event}: {exception}')
 
     def __status_event(self, event, _):
-        for msg in self.parser.message_iter(event):
-            topic = msg.correlationId().value()
-            match msg.messageType():
+        for message in Parser.message_iter(event):
+            topic = message.correlationId().value()
+            match message.messageType():
                 case Name.SUBSCRIPTION_FAILURE:
-                    desc = msg.getElement('reason').getElementAsString('description')
+                    desc = message.getElement('reason').getElementAsString('description')
                     raise Exception(f'Subscription failed topic={topic} desc={desc}')
                 case Name.SUBSCRIPTION_TERMINATED:
                     # Subscription can be terminated if the session identity is revoked.
@@ -60,12 +59,12 @@ class BaseEventHandler(metaclass=ABCMeta):
 
     def __data_event(self, event, _):
         """Return a full mapping of fields to parsed values"""
-        for msg in self.parser.message_iter(event):
+        for message in Parser.message_iter(event):
             parsed = {}
-            topic = msg.correlationId().value()
+            topic = message.correlationId().value()
             for field in self.fields:
-                if field.upper() in msg:
-                    val = self.parser.get_child_value(msg, field.upper())
+                if field.upper() in message:
+                    val = Parser.get_subelement_value(message, field.upper())
                     parsed[field] = val
             self.emit(topic, parsed)
 

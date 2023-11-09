@@ -2,6 +2,7 @@
 See HistoricalDataResponse
 """
 import atexit
+import datetime
 import logging
 from abc import ABCMeta, abstractmethod
 from collections import defaultdict
@@ -10,6 +11,7 @@ from collections.abc import Iterable
 import blpapi
 import numpy as np
 import pandas as pd
+import pytz
 import win32api
 import win32con
 from bbg.handle import BaseEventHandler
@@ -37,14 +39,14 @@ class BaseRequest(metaclass=ABCMeta):
         service_name,
         raise_security_error=False,
         raise_field_error=False,
-        values_as_string=False,
+        force_string=False,
     ):
         self.field_errors = []
         self.security_errors = []
         self.raise_security_error = raise_security_error
         self.raise_field_error = raise_field_error
         self.service_name = service_name
-        self.parser = Parser(values_as_string=values_as_string)
+        self.force_string = force_string
         self.response = None
 
     @abstractmethod
@@ -76,14 +78,14 @@ class BaseRequest(metaclass=ABCMeta):
         pass
 
     def on_admin_event(self, event):
-        for msg in event:
-            if msg.messageType() == Name.SESSION_CONNECTION_UP:
+        for message in event:
+            if message.messageType() == Name.SESSION_CONNECTION_UP:
                 logger.info('Connected ...')
-            elif Name.SESSION_STARTED in msg:
+            elif Name.SESSION_STARTED in message:
                 logger.info('Started new Bbg session ...')
-            elif 'ServiceOpened' in msg:
+            elif 'ServiceOpened' in message:
                 logger.info('Opened Bbg service ...')
-            elif msg.messageType() == 'SessionTerminated':
+            elif message.messageType() == 'SessionTerminated':
                 logger.info('Session DONE')
                 raise RuntimeError('Session DONE')
 
@@ -121,7 +123,7 @@ class HistoricalDataResponse(BaseResponse):
 
     def on_security_complete(self, sid, frame):
         self.response_map[sid] = (
-            frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
+            frame.astype(object).where(frame.notna(), None) if self.request.force_string else frame
         )
 
     def as_dictionary(self):
@@ -167,7 +169,7 @@ class HistoricalDataRequest(BaseRequest):
         period=None,
         raise_security_error=False,
         raise_field_error=False,
-        values_as_string=False,
+        force_string=False,
         period_adjustment=None,
         currency=None,
         override_option=None,
@@ -186,7 +188,7 @@ class HistoricalDataRequest(BaseRequest):
             '//blp/refdata',
             raise_security_error=raise_security_error,
             raise_field_error=raise_field_error,
-            values_as_string=values_as_string,
+            force_string=force_string,
         )
         period = period or 'DAILY'
         assert period in ('DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'SEMI_ANNUALLY', 'YEARLY')
@@ -250,13 +252,17 @@ class HistoricalDataRequest(BaseRequest):
             self.apply_overrides(request, self.overrides)
         return request
 
-    def on_security_data_node(self, node):
-        """Process a securityData node - FIXME: currently not handling relateDate node"""
-        sid = self.parser.get_child_value(node, Name.SECURITY)
-        fields = node.getElement(Name.FIELD_DATA)
+    def on_security_data_element(self, element):
+        """Process a securityData element - FIXME: currently not handling relateDate element"""
+        sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+        fields = element.getElement(Name.FIELD_DATA)
         dmap = defaultdict(list)
         for pt in fields.values():
-            [dmap[f].append(self.parser.get_child_value(pt, f)) for f in ['date'] + self.fields]
+            for f in ['date'] + self.fields:
+                field_val = Parser.get_subelement_value(pt, f, self.force_string)
+                if isinstance(field_val, datetime.datetime):
+                    field_val = field_val.astimezone(self.timezone)
+                dmap[f].append(field_val)
 
         if not dmap:
             frame = pd.DataFrame(columns=self.fields)
@@ -267,14 +273,14 @@ class HistoricalDataRequest(BaseRequest):
         self.response.on_security_complete(sid, frame)
 
     def process_response(self, event, is_final):
-        for msg in self.parser.message_iter(event):
+        for message in Parser.message_iter(event):
             # Single security element in historical request
-            node = msg.getElement(Name.SECURITY_DATA)
-            if Name.SECURITY_ERROR in node:
-                sid = self.parser.get_child_value(node, Name.SECURITY)
-                self.security_errors.append(self.parser.as_security_error(node.getElement(Name.SECURITY_ERROR), sid))
+            element = message.getElement(Name.SECURITY_DATA)
+            if Name.SECURITY_ERROR in element:
+                sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+                self.security_errors.append(Parser.as_security_error(element.getElement(Name.SECURITY_ERROR), sid))
             else:
-                self.on_security_data_node(node)
+                self.on_security_data_element(element)
 
 
 class ReferenceDataResponse(BaseResponse):
@@ -292,9 +298,10 @@ class ReferenceDataResponse(BaseResponse):
         """:return: Multi-Index DataFrame"""
         data = {sid: pd.Series(data) for sid, data in self.response_map.items()}
         frame = pd.DataFrame.from_dict(data, orient='index')
-        # layer in any missing fields just in case
-        frame = frame.reindex(self.request.fields, axis=1)
-        return frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
+        frame = frame.reindex(self.request.fields, axis=1)  # layer in any missing fields just in case
+        if self.request.force_string:
+            frame = frame.astype(object).where(frame.notna(), None)
+        return frame
 
 
 class ReferenceDataRequest(BaseRequest):
@@ -305,8 +312,8 @@ class ReferenceDataRequest(BaseRequest):
         raise_security_error=False,
         raise_field_error=False,
         return_formatted_value=None,
-        use_utc_time=None,
-        values_as_string=False,
+        timezone='UTC',
+        force_string=False,
         **overrides,
     ):
         """response_type: (frame, map) how to return the results"""
@@ -314,14 +321,14 @@ class ReferenceDataRequest(BaseRequest):
             '//blp/refdata',
             raise_security_error=raise_security_error,
             raise_field_error=raise_field_error,
-            values_as_string=values_as_string,
+            force_string=force_string,
         )
         self.is_single_sid = is_single_sid = isinstance(sids, str)
         self.is_single_field = is_single_field = isinstance(fields, str)
         self.sids = isinstance(sids, str) and [sids] or sids
         self.fields = isinstance(fields, str) and [fields] or fields
         self.return_formatted_value = return_formatted_value
-        self.use_utc_time = use_utc_time
+        self.timezone = pytz.timezone(timezone)
         self.overrides = overrides
 
     def __repr__(self):
@@ -341,25 +348,26 @@ class ReferenceDataRequest(BaseRequest):
         [request.append('securities', sec) for sec in self.sids]
         [request.append('fields', fld) for fld in self.fields]
         self.set_flag(request, self.return_formatted_value, 'returnFormattedValue')
-        self.set_flag(request, self.use_utc_time, 'useUTCTime')
+        self.set_flag(request, True, 'useUTCTime')
         self.apply_overrides(request, self.overrides)
         return request
 
     def process_response(self, event, is_final):
-        for msg in self.parser.message_iter(event):
-            for node, err in self.parser.security_iter(msg.getElement(Name.SECURITY_DATA)):
+        for msg in Parser.message_iter(event):
+            for element, err in Parser.security_element_iter(msg.getElement(Name.SECURITY_DATA)):
                 if err:
                     self.security_errors.append(err)
                     continue
-                self._process_security_node(node)
+                self._process_security_element(element)
 
-    def _process_security_node(self, node):
-        sid = self.parser.get_child_value(node, Name.SECURITY)
-        fields = node.getElement(Name.FIELD_DATA)
-        field_data = self.parser.get_child_values(fields, self.fields)
+    def _process_security_element(self, element):
+        sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+        fields = element.getElement(Name.FIELD_DATA)
+        field_data = Parser.get_subelement_values(fields, self.fields, self.force_string)
+        field_data = [x.astimezone(self.timezone) if isinstance(x, datetime.datetime) else x for x in field_data]
         assert len(field_data) == len(self.fields), 'Field length must match data length'
         self.response.on_security_data(sid, dict(list(zip(self.fields, field_data))))
-        field_errors = self.parser.get_field_errors(node)
+        field_errors = Parser.get_field_errors(element)
         field_errors and self.field_errors.extend(field_errors)
 
 
@@ -371,7 +379,7 @@ class IntradayTickResponse(BaseResponse):
     def as_dataframe(self):
         """Return a data frame with no set index"""
         frame = pd.DataFrame.from_records(self.ticks)
-        return frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
+        return frame.astype(object).where(frame.notna(), None) if self.request.force_string else frame
 
 
 class IntradayTickRequest(BaseRequest):
@@ -441,13 +449,13 @@ class IntradayTickRequest(BaseRequest):
 
     def on_tick_data(self, ticks):
         """Process the incoming tick data array"""
-        for tick in self.parser.node_iter(ticks):
+        for tick in Parser.element_iter(ticks):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
-            tickmap = {n: self.parser.get_child_value(tick, n) for n in names}
+            tickmap = {n: Parser.get_subelement_value(tick, n) for n in names}
             self.response.ticks.append(tickmap)
 
     def process_response(self, event, is_final):
-        for msg in self.parser.message_iter(event):
+        for msg in Parser.message_iter(event):
             tdata = msg.getElement('tickData')
             # tickData will have 0 to 1 tickData[] elements
             if 'tickData' in tdata:
@@ -461,7 +469,7 @@ class IntradayBarResponse(BaseResponse):
 
     def as_dataframe(self):
         frame = pd.DataFrame.from_records(self.bars)
-        return frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
+        return frame.astype(object).where(frame.notna(), None) if self.request.force_string else frame
 
 
 class IntradayBarRequest(BaseRequest):
@@ -529,13 +537,13 @@ class IntradayBarRequest(BaseRequest):
 
     def on_bar_data(self, bars):
         """Process the incoming tick data array"""
-        for tick in self.parser.node_iter(bars):
+        for tick in Parser.element_iter(bars):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
-            barmap = {n: self.parser.get_child_value(tick, n) for n in names}
+            barmap = {n: Parser.get_subelement_value(tick, n) for n in names}
             self.response.bars.append(barmap)
 
     def process_response(self, event, is_final):
-        for msg in self.parser.message_iter(event):
+        for msg in Parser.message_iter(event):
             data = msg.getElement('barData')
             # tickData will have 0 to 1 tickData[] elements
             if 'barTickData' in data:
@@ -557,7 +565,7 @@ class EQSResponse(BaseResponse):
         """:return: Multi-Index DataFrame"""
         data = {sid: pd.Series(data) for sid, data in self.response_map.items()}
         frame = pd.DataFrame.from_dict(data, orient='index')
-        return frame.astype(object).where(frame.notna(), None) if self.request.parser.values_as_string else frame
+        return frame.astype(object).where(frame.notna(), None) if self.request.force_string else frame
 
 
 class EQSRequest(BaseRequest):
@@ -596,22 +604,22 @@ class EQSRequest(BaseRequest):
         return request
 
     def process_response(self, event, is_final):
-        for msg in self.parser.message_iter(event):
-            data = msg.getElement('data')
+        for message in Parser.message_iter(event):
+            data = message.getElement('data')
             security = data.getElement(Name.SECURITY_DATA)
-            for node, error in self.parser.security_iter(security):
+            for element, error in Parser.security_iter(security):
                 if error:
                     self.security_errors.append(error)
                     continue
-                self._process_security_node(node)
+                self._process_security_element(element)
 
-    def _process_security_node(self, node):
-        sid = self.parser.get_child_value(node, Name.SECURITY)
-        fields = node.getElement(Name.FIELD_DATA)
+    def _process_security_element(self, element):
+        sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+        fields = element.getElement(Name.FIELD_DATA)
         fldnames = [str(field.name()) for field in fields.elements()]
-        fdata = self.parser.get_child_values(fields, fldnames)
+        fdata = Parser.get_subelement_values(fields, fldnames)
         self.response.on_security_data(sid, dict(list(zip(fldnames, fdata))))
-        ferrors = self.parser.get_field_errors(node)
+        ferrors = Parser.get_field_errors(element)
         ferrors and self.field_errors.extend(ferrors)
 
 

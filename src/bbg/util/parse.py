@@ -1,14 +1,15 @@
 import contextlib
+import datetime
 import json
 import logging
 from collections import defaultdict, namedtuple
-from datetime import datetime
 from typing import List, Optional
 
 import blpapi
 import numpy as np
 import pandas as pd
 import pytz
+from blpapi.datatype import DataType
 
 logger = logging.getLogger(__name__)
 
@@ -51,117 +52,117 @@ FieldError = namedtuple(
 )
 
 UTC = pytz.timezone('UTC')
-GMT = pytz.timezone('GMT')
-EST = pytz.timezone('US/Eastern')
 
-TYPE_MAP = {
-    'NUMERIC': (1, 2, 3, 4, 5, 6, 7, 9, 12),  # BOOL, CHAR, BYTE, INT32, INT64, FLOAT32, FLOAT64, BYTEARRAY, DECIMAL)
-    'STRING': (8,),
-    'DATE': (10,),
-    'DATETIME': (11, 13),
-    'ENUM': (14,),
-    'SEQUENCE': (15,),
-    'CHOICE': (16,),
-}
+NUMERIC_TYPES = (
+    DataType.BOOL, DataType.CHAR, DataType.BYTE, DataType.INT32, DataType.INT64, DataType.FLOAT32, DataType.FLOAT64,
+    DataType.BYTEARRAY, DataType.DECIMAL
+)
 
 
 class Parser:
-    """Interpreter class for Bloomberg Events"""
+    """Interpreter class for Bloomberg Events
 
-    def __init__(self, values_as_string=False, use_timezone=EST):
-        self.values_as_string = values_as_string
-        self.tz = use_timezone
+    One Event -> one or more Message -> one or more Element
+
+    """
 
     #
-    # iterator wrappers to handle errors in nodes
+    # iterator wrappers to handle errors in elements
     #
 
-    def security_iter(self, nodes):
+    @staticmethod
+    def security_element_iter(elements):
         """Provide a security data iterator by returning a tuple of (Element, SecurityError) which are mutually exclusive"""
-        if nodes.name() != Name.SECURITY_DATA:
+        if elements.name() != Name.SECURITY_DATA:
             return None, None
-        assert nodes.isArray()
-        for node in nodes.values():
-            err = self.get_security_error(node)
-            result = (None, err) if err else (node, None)
+        assert elements.isArray()
+        for element in elements.values():  # same as element_iter
+            err = Parser.get_security_error(element)
+            result = (None, err) if err else (element, None)
             yield result
 
-    def node_iter(self, nodes):
-        yield from nodes.values() if nodes.isArray() else []
+    @staticmethod
+    def element_iter(elements) -> List[blpapi.element.Element]:
+        yield from elements.values() if elements.isArray() else []
 
-    def message_iter(self, event):
+    @staticmethod
+    def message_iter(event) -> List[blpapi.message.Message]:
         """Provide a message iterator which checks for a response error prior to returning"""
-        for msg in event:
-            if Name.RESPONSE_ERROR in msg:
-                raise Exception(f'REQUEST FAILED: {str(msg[Name.RESPONSE_ERROR])}')
-            yield msg
+        for message in event:
+            if Name.RESPONSE_ERROR in message:
+                raise Exception(f'REQUEST FAILED: {str(message[Name.RESPONSE_ERROR])}')
+            yield message
 
     #
     # value getters
     #
 
-    def get_child_value(self, parent, name):
+    @staticmethod
+    def get_subelement_value(element, name, force_string=False):
         """Return the value of the child element with name in the parent Element"""
-        if name not in parent:
-            logger.error(f'Failed to find child element {name} in parent {parent}')
+        if name not in element:
+            logger.error(f'Failed to find child element {name} in parent {element}')
             return np.nan
-        return self.as_value(parent.getElement(name))
+        return Parser.element_as_value(element.getElement(name), force_string)
 
-    def get_child_values(self, parent, names):
+    @staticmethod
+    def get_subelement_values(element, names, force_string=False):
         """Return a list of values for the specified child fields. If field not in Element then replace with nan."""
-        return [self.get_child_value(parent, name) for name in names]
+        return [Parser.get_subelement_value(element, name, force_string) for name in names]
 
-    def as_value(self, el):
+    @staticmethod
+    def element_as_value(element, force_string=False):
         """Convert the specified element as a python value"""
-        typ = el.datatype()
-        if typ in TYPE_MAP['SEQUENCE']:
-            if self.values_as_string:
-                return self._get_sequence_value_as_json(el)
-            else:
-                return self._get_sequence_value_as_dataframe(el)
-        if self.values_as_string:
-            return clean_string_value(el.getValueAsString())
-        if typ in TYPE_MAP['NUMERIC']:
-            return el.getValue() or np.nan
-        if typ in TYPE_MAP['DATE']:
-            if el.isNull():
+        typ = element.datatype()
+        if typ == DataType.SEQUENCE:
+            if not force_string:
+                with contextlib.suppress(blpapi.exception.UnsupportedOperationException):
+                    return Parser._sequence_as_dataframe(element)
+            return Parser._sequence_as_json(element)
+        if force_string:
+            return clean_string_value(element.getValueAsString())
+        if typ in NUMERIC_TYPES:
+            return element.getValue() or np.nan
+        if typ in (DataType.DATE, DataType.DATETIME, DataType.TIME):
+            if element.isNull():
                 return pd.NaT
-            v = el.getValue()
-            dt = datetime(year=v.year, month=v.month, day=v.day)
-            return dt.astimezone(self.tz)
-        if typ in TYPE_MAP['DATETIME']:
-            if el.isNull():
-                return pd.NaT
-            v = el.getValue()
-            now = datetime.now()
-            dt = datetime(year=now.year, month=now.month, day=now.day, hour=v.hour, minute=v.minute, second=v.second)
-            return dt.astimezone(self.tz)
-        if typ in TYPE_MAP['CHOICE']:
+            v = element.getValue()
+            if isinstance(v, datetime.date):
+                return v
+            if isinstance(v, datetime.datetime):
+                return v.astimezone(UTC)
+            if isinstance(v, datetime.time):
+                t = datetime.date.today()
+                dt = datetime.datetime(t.year, t.month, t.day, v.hour, v.minute, v.second)
+                return dt.astimezone(UTC)
+        if typ == DataType.CHOICE:
             logger.error('CHOICE data type needs implemented')
-        return clean_string_value(el.getValueAsString())
+        return clean_string_value(element.getValueAsString())
 
     #
     # error getters
     #
 
-    def get_security_error(self, node) -> Optional[SecurityError]:
+    @staticmethod
+    def get_security_error(element) -> Optional[SecurityError]:
         """Return a SecurityError if the specified securityData element has one, else return None"""
-        if node.name() != Name.SECURITY_DATA:
+        if element.name() != Name.SECURITY_DATA:
             return
-        assert not node.isArray()
-        if Name.SECURITY_ERROR in node:
-            secid = self.get_child_value(node, Name.SECURITY)
-            error = self._as_security_error(node.getElement(Name.SECURITY_ERROR), secid)
+        assert not element.isArray()
+        if Name.SECURITY_ERROR in element:
+            secid = Parser.get_subelement_value(element, Name.SECURITY)
+            error = Parser._as_security_error(element.getElement(Name.SECURITY_ERROR), secid)
             return error
 
-    def get_field_errors(self, node) -> Optional[List[FieldError]]:
+    @staticmethod
+    def get_field_errors(element) -> Optional[List[FieldError]]:
         """Return a list of FieldErrors if the specified securityData element has field errors"""
-        if node.name() != Name.SECURITY_DATA:
+        if element.name() != Name.SECURITY_DATA:
             return []
-        assert not node.isArray()
-        if Name.FIELD_EXCEPTIONS in node:
-            secid = self.get_child_value(node, Name.SECURITY)
-            errors = self._as_field_error(node.getElement(Name.FIELD_EXCEPTIONS), secid)
+        assert not element.isArray()
+        if Name.FIELD_EXCEPTIONS in element:
+            secid = Parser.get_subelement_value(element, Name.SECURITY)
+            errors = Parser._as_field_error(element.getElement(Name.FIELD_EXCEPTIONS), secid)
             return errors
         return []
 
@@ -169,44 +170,48 @@ class Parser:
     # private methods
     #
 
-    def _get_sequence_value_as_dataframe(self, nodes):
+    @staticmethod
+    def _sequence_as_dataframe(elements):
         data = defaultdict(list)
         cols = []
-        for i, node in enumerate(nodes.values()):
+        for i, element in enumerate(elements.values()):
             if i == 0:  # Get the ordered cols and assume they are constant
-                cols = [str(_.name()) for _ in node.elements()]
-            for cidx, _ in enumerate(node.elements()):
-                el = node.getElement(cidx)
-                data[str(el.name())].append(self.as_value(el))
+                cols = [str(_.name()) for _ in element.elements()]
+            for cidx, _ in enumerate(element.elements()):
+                element = element.getElement(cidx)
+                data[str(element.name())].append(Parser.element_as_value(element))
         return pd.DataFrame(data, columns=cols)
 
-    def _get_sequence_value_as_json(self, nodes):
+    @staticmethod
+    def _sequence_as_json(elements):
         data = []
-        for k, _ in enumerate(nodes.values()):
-            node = nodes.getValueAsElement(k)
-            for subnode in node.elements():
-                d = {str(subnode.name()): clean_string_value(subnode.getValueAsString())}
+        for k, _ in enumerate(elements.values()):
+            element = elements.getValueAsElement(k)
+            for subelement in element.elements():
+                d = {str(subelement.name()): clean_string_value(subelement.getValueAsString())}
                 data += [d]
         return json.dumps(data) if data else ''
 
-    def _as_security_error(self, node, secid):
+    @staticmethod
+    def _as_security_error(element, secid):
         """Convert the securityError element to a SecurityError"""
-        if node.name() != Name.SECURITY_ERROR:
+        if element.name() != Name.SECURITY_ERROR:
             return
-        cat = self.get_child_value(node, Name.CATEGORY)
-        msg = self.get_child_value(node, Name.MESSAGE)
-        subcat = self.get_child_value(node, Name.SUBCATEGORY)
+        cat = Parser.get_subelement_value(element, Name.CATEGORY)
+        msg = Parser.get_subelement_value(element, Name.MESSAGE)
+        subcat = Parser.get_subelement_value(element, Name.SUBCATEGORY)
         return SecurityError(security=secid, category=cat, message=msg, subcategory=subcat)
 
-    def _as_field_error(self, node, secid):
+    @staticmethod
+    def _as_field_error(element, secid):
         """Convert a fieldExceptions element to a FieldError or FieldError array"""
-        if node.name() != Name.FIELD_EXCEPTIONS:
+        if element.name() != Name.FIELD_EXCEPTIONS:
             return []
-        if node.isArray():
-            return [self._as_field_error(_, secid) for _ in node.values()]
-        fld = self.get_child_value(node, Name.FIELD_ID)
-        info = node.getElement(Name.ERROR_INFO)
-        cat = self.get_child_value(info, Name.CATEGORY)
-        msg = self.get_child_value(info, Name.MESSAGE)
-        subcat = self.get_child_value(info, Name.SUBCATEGORY)
+        if element.isArray():
+            return [Parser._as_field_error(_, secid) for _ in element.values()]
+        fld = Parser.get_subelement_value(element, Name.FIELD_ID)
+        info = element.getElement(Name.ERROR_INFO)
+        cat = Parser.get_subelement_value(info, Name.CATEGORY)
+        msg = Parser.get_subelement_value(info, Name.MESSAGE)
+        subcat = Parser.get_subelement_value(info, Name.SUBCATEGORY)
         return FieldError(security=secid, field=fld, category=cat, message=msg, subcategory=subcat)
