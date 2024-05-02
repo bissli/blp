@@ -4,7 +4,7 @@ See HistoricalDataResponse
 import atexit
 import datetime
 import logging
-from abc import ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable
 
@@ -14,12 +14,16 @@ import pandas as pd
 import pytz
 import win32api
 import win32con
-from bbg.handle import BaseEventHandler
-from bbg.util import Name, NonBlockingDelay, Parser
+from blp.handle import BaseEventHandler
+from blp.parse import Name, Parser
 from blpapi.event import Event
 from dateutil.relativedelta import relativedelta
 
+import libb
+
 logger = logging.getLogger(__name__)
+
+__all__ = ['Blp']
 
 
 def empty(obj):
@@ -31,7 +35,7 @@ def empty(obj):
     return bool(obj)
 
 
-class BaseRequest(metaclass=ABCMeta):
+class BaseRequest(ABC):
     """Base Request Object"""
 
     def __init__(
@@ -108,9 +112,8 @@ class BaseRequest(metaclass=ABCMeta):
         self.response = response
 
 
-class BaseResponse(metaclass=ABCMeta):
+class BaseResponse(ABC):
     """Base class for Responses"""
-
     @abstractmethod
     def as_dataframe(self):
         pass
@@ -191,11 +194,11 @@ class HistoricalDataRequest(BaseRequest):
             force_string=force_string,
         )
         period = period or 'DAILY'
-        assert period in ('DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'SEMI_ANNUALLY', 'YEARLY')
+        assert period in {'DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'SEMI_ANNUALLY', 'YEARLY'}
         self.is_single_sid = is_single_sid = isinstance(sids, str)
         self.is_single_field = is_single_field = isinstance(fields, str)
-        self.sids = is_single_sid and [sids] or list(sids)
-        self.fields = is_single_field and [fields] or list(fields)
+        self.sids = [sids] if is_single_sid else list(sids)
+        self.fields = [fields] if is_single_field else list(fields)
         self.end = end = pd.to_datetime(end) if empty(end) else pd.Timestamp.now()
         self.start = pd.to_datetime(start) if empty(start) else end + relativedelta(years=-1)
         self.period = period
@@ -325,8 +328,8 @@ class ReferenceDataRequest(BaseRequest):
         )
         self.is_single_sid = is_single_sid = isinstance(sids, str)
         self.is_single_field = is_single_field = isinstance(fields, str)
-        self.sids = isinstance(sids, str) and [sids] or sids
-        self.fields = isinstance(fields, str) and [fields] or fields
+        self.sids = [sids] if isinstance(sids, str) else sids
+        self.fields = [fields] if isinstance(fields, str) else fields
         self.return_formatted_value = return_formatted_value
         self.timezone = pytz.timezone(timezone)
         self.overrides = overrides
@@ -405,7 +408,7 @@ class IntradayTickRequest(BaseRequest):
     ):
         super().__init__('//blp/refdata')
         self.sid = sid
-        self.events = isinstance(events, str) and [events] or events
+        self.events = [events] if isinstance(events, str) else events
         self.include_condition_codes = include_condition_codes
         self.include_nonplottable_events = include_nonplottable_events
         self.include_exchange_codes = include_exchange_codes
@@ -574,7 +577,7 @@ class EQSRequest(BaseRequest):
         self.name = name
         self.group = group
         self.type = type
-        self.asof = asof and pd.to_datetime(asof) or None
+        self.asof = pd.to_datetime(asof) if asof else None
         self.language = language
 
     def __repr__(self):
@@ -633,7 +636,7 @@ class Session(blpapi.Session):
     def open_service(self, service_name):
         """Open service. Raise Exception if fails."""
         if not self.openService(service_name):
-            raise Exception(f'Failed to open service {service_name}.')
+            raise RuntimeError(f'Failed to open service {service_name}.')
 
     def __cleanup__(self):
         try:
@@ -679,7 +682,6 @@ def create_session(
 
 class SessionFactory:
     """Session Factory"""
-
     @staticmethod
     def create(
         host='localhost',
@@ -688,16 +690,35 @@ class SessionFactory:
         event_handler=None,
         event_dispatcher=None,
     ) -> Session:
+        """Create Bloomberg API Session.
+
+        Parameters
+        ----------
+        host : Not tested for BPIPE.
+        port : Not tested for BPIPE.
+        auth : Not tested for BPIPE.
+        event_handler : Needed only for subscriptions.
+        event_dispatcher : Needed only for subscriptions.
+
+        Returns
+        -------
+        blpapi.Session object.
+
+        Raises
+        ------
+        Exception : Exception on fail to start session.
+
+        """
         logger.info('Connecting to Bloomberg BBComm session...')
         session = create_session(host, port, auth, event_handler, event_dispatcher)
         if not session.start():
-            raise Exception('Failed to start session.')
+            raise RuntimeError('Failed to start session.')
         envuser = win32api.GetUserNameEx(win32con.NameSamCompatible)
         logger.info(f'Connected to Bloomberg BBComm as {envuser}')
         return session
 
 
-class Context:
+class Blp:
     """Submits requests to the Bloomberg API and dispatches the events back to the request
     object for processing.
     """
@@ -717,7 +738,7 @@ class Context:
         }
         return '<{clz}({host}:{port}:{auth})'.format(**fmtargs)
 
-    def execute(self, request: BaseRequest):
+    def execute(self, request: BaseRequest) -> BaseResponse:
         logger.info(f'Sending request: {repr(request)}')
         self.session.open_service(request.service_name)
         service = self.session.getService(request.service_name)
@@ -726,7 +747,7 @@ class Context:
         request.prepare_response()
         return self._wait_for_response(request)
 
-    def _wait_for_response(self, request: BaseRequest):
+    def _wait_for_response(self, request: BaseRequest) -> BaseResponse:
         """Waits for response after sending the request.
 
         Success response can come with a number of
@@ -765,7 +786,24 @@ class Context:
         raise_security_error=False,
         raise_field_error=False,
         **overrides,
-    ):
+    ) -> HistoricalDataResponse:
+        """Equivalent of Excel BDH Request.
+
+        Parameters
+        ----------
+        sids :
+        flds :
+        start :
+        end :
+        period :
+        raise_security_error :
+        raise_field_error :
+
+        Returns
+        -------
+        HistoricalDataResponse
+
+        """
         req = HistoricalDataRequest(
             sids,
             flds,
@@ -784,8 +822,22 @@ class Context:
         flds,
         raise_security_error=False,
         raise_field_error=False,
-        **overrides,
-    ):
+        **overrides
+    ) -> ReferenceDataResponse:
+        """Equivalent of Excel BDP Request.
+
+        Parameters
+        ----------
+        sids :
+        flds :
+        raise_security_error :
+        raise_field_error :
+
+        Returns
+        -------
+        ReferenceDataResponse
+
+        """
         req = ReferenceDataRequest(
             sids,
             flds,
@@ -798,7 +850,7 @@ class Context:
     def get_intraday_tick(
         self,
         sid,
-        events=['TRADE', 'ASK', 'BID'],
+        events=None,
         start=None,
         end=None,
         include_condition_codes=None,
@@ -814,6 +866,8 @@ class Context:
         include_bic_mic_codes=None,
         **overrides,
     ):
+        if events is None:
+            events = ['TRADE', 'ASK', 'BID']
         req = IntradayTickRequest(
             sid,
             start=start,
@@ -885,16 +939,29 @@ class Subscription:
 
     def __init__(
         self,
-        topics,  # IE ['IBM US Equity', 'TSLA US Equity' ]
-        fields,  # IE `['BID', 'ASK', 'TRADE']`
-        interval=0,  # Time in seconds to intervalize the subscriptions
+        topics,
+        fields,
+        interval=0,
         host='localhost',
         port=8194,
         auth='AuthenticationType=OS_LOGON',
-        dispatcher=None,  # if None, will create a defualt Dispatcher (single thread)
+        dispatcher=None,
     ):
-        self.fields = isinstance(fields, str) and [fields] or fields
-        self.topics = isinstance(topics, str) and [topics] or topics
+        """
+
+        Parameters
+        ----------
+        topics :  (Sids, but also custom Bloomberg mnemonics IE @MSG1). IE ['IBM US Equity', 'TSLA US Equity' ]
+        fields :  IE `['BID', 'ASK', 'TRADE']`
+        interval :  Time in seconds to intervalize the subscriptions
+        host : For session creation. See SessionFactory.
+        port : For session creation. See SessionFactory.
+        auth : For session creation. See SessionFactory.
+        dispatcher :  if None, will create a defualt Dispatcher (single thread)
+
+        """
+        self.fields = [fields] if isinstance(fields, str) else fields
+        self.topics = [topics] if isinstance(topics, str) else topics
         self.interval = interval
         self.host = host
         self.port = port
@@ -902,14 +969,20 @@ class Subscription:
         self.dispatcher = dispatcher
 
     def subscribe(self, handler: BaseEventHandler, runtime=24 * 60 * 60, *args, **kwargs):
-        """Form of created subscription string (subscriptions.add):
+        r"""Open subscription.
+
+        Parameters
+        ----------
+        handler : Async handler instance of BaseHandler. Expects class, not object instance
+        runtime : Duration to run service in seconds. Generally best to run between 0 and time to market close..
+
+        Form of created subscription string (subscriptions.add):
 
         "//blp/mktdata/ticker/IBM US Equity?fields=BID,ASK&interval=2"
         \\-----------/\\------/\\-----------/\\------------------------/
         |          |         |                  |
         Service    Prefix   Instrument           Suffix
 
-        handler: async handler of events: primary driver of event routing (class expected, not instance).
         """
         _handler = handler(self.topics, self.fields, *args, **kwargs)
         session = SessionFactory.create(self.host, self.port, self.auth, _handler, self.dispatcher)
@@ -921,12 +994,11 @@ class Subscription:
             subscriptions.add(topic, self.fields, options, blpapi.CorrelationId(topic))
         session.subscribe(subscriptions)
 
-        _runtime = NonBlockingDelay()
+        _runtime = libb.NonBlockingDelay()
         _runtime.delay(runtime)
 
         while not _runtime.timeout():
             continue
 
         logger.warning('Subscription runtime expired. Unsubscribing...')
-
         session.unsubscribe(subscriptions)

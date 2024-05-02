@@ -3,7 +3,6 @@ import datetime
 import json
 import logging
 from collections import defaultdict, namedtuple
-from typing import List, Optional
 
 import blpapi
 import numpy as np
@@ -11,30 +10,14 @@ import pandas as pd
 import pytz
 from blpapi.datatype import DataType
 
+import libb
+
 logger = logging.getLogger(__name__)
-
-
-def clean_string_value(v: str) -> str:
-    """Clean string comprised of digits"""
-    v = v.strip()
-
-    with contextlib.suppress(ValueError):
-        v_float = float(v)
-        v_int = int(v_float)
-        v = v_int if v_float == v_int else round(v_float, 3)
-        return str(v)
-
-    return v
-
-
-def underscore_to_camelcase(text):
-    """Converts underscore_delimited_text to camelCase"""
-    return ''.join(word.title() if i else word.lower() for i, word in enumerate(text.split('_')))
 
 
 class NameType(type):
     def __getattribute__(cls, name):
-        _name = underscore_to_camelcase(name)
+        _name = libb.underscore_to_camelcase(name)
         return blpapi.Name.findName(_name) or blpapi.Name(_name)
 
 
@@ -54,8 +37,9 @@ FieldError = namedtuple(
 UTC = pytz.timezone('UTC')
 
 NUMERIC_TYPES = (
-    DataType.BOOL, DataType.CHAR, DataType.BYTE, DataType.INT32, DataType.INT64, DataType.FLOAT32, DataType.FLOAT64,
-    DataType.BYTEARRAY, DataType.DECIMAL
+    DataType.BOOL, DataType.CHAR, DataType.BYTE, DataType.INT32,
+    DataType.INT64, DataType.FLOAT32, DataType.FLOAT64, DataType.BYTEARRAY,
+    DataType.DECIMAL
 )
 
 
@@ -82,11 +66,11 @@ class Parser:
             yield result
 
     @staticmethod
-    def element_iter(elements) -> List[blpapi.element.Element]:
+    def element_iter(elements) -> list[blpapi.element.Element]:
         yield from elements.values() if elements.isArray() else []
 
     @staticmethod
-    def message_iter(event) -> List[blpapi.message.Message]:
+    def message_iter(event) -> list[blpapi.message.Message]:
         """Provide a message iterator which checks for a response error prior to returning"""
         for message in event:
             if Name.RESPONSE_ERROR in message:
@@ -120,10 +104,10 @@ class Parser:
                     return Parser._sequence_as_dataframe(element)
             return Parser._sequence_as_json(element)
         if force_string:
-            return clean_string_value(element.getValueAsString())
+            return libb.round_digit_string(element.getValueAsString())
         if typ in NUMERIC_TYPES:
             return element.getValue() or np.nan
-        if typ in (DataType.DATE, DataType.DATETIME, DataType.TIME):
+        if typ in {DataType.DATE, DataType.DATETIME, DataType.TIME}:
             if element.isNull():
                 return pd.NaT
             v = element.getValue()
@@ -137,14 +121,14 @@ class Parser:
                 return dt.astimezone(UTC)
         if typ == DataType.CHOICE:
             logger.error('CHOICE data type needs implemented')
-        return clean_string_value(element.getValueAsString())
+        return libb.round_digit_string(element.getValueAsString())
 
     #
     # error getters
     #
 
     @staticmethod
-    def get_security_error(element) -> Optional[SecurityError]:
+    def get_security_error(element) -> SecurityError | None:
         """Return a SecurityError if the specified securityData element has one, else return None"""
         if element.name() != Name.SECURITY_DATA:
             return
@@ -155,7 +139,7 @@ class Parser:
             return error
 
     @staticmethod
-    def get_field_errors(element) -> Optional[List[FieldError]]:
+    def get_field_errors(element) -> list[FieldError] | None:
         """Return a list of FieldErrors if the specified securityData element has field errors"""
         if element.name() != Name.SECURITY_DATA:
             return []
@@ -172,6 +156,7 @@ class Parser:
 
     @staticmethod
     def _sequence_as_dataframe(elements):
+        """Convert an element with DataType Sequence to a DataFrame."""
         data = defaultdict(list)
         cols = []
         for i, element in enumerate(elements.values()):
@@ -188,7 +173,7 @@ class Parser:
         for k, _ in enumerate(elements.values()):
             element = elements.getValueAsElement(k)
             for subelement in element.elements():
-                d = {str(subelement.name()): clean_string_value(subelement.getValueAsString())}
+                d = {str(subelement.name()): libb.round_digit_string(subelement.getValueAsString())}
                 data += [d]
         return json.dumps(data) if data else ''
 

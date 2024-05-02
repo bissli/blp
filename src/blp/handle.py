@@ -1,18 +1,18 @@
 import logging
 import time
 import warnings
-from abc import ABCMeta, abstractmethod
+from abc import abstractmethod, ABC
 
 import blpapi
 import numpy as np
 import pandas as pd
-from bbg.util import Name, Parser
+from blp.util import Name, Parser
 from blpapi.event import Event
 
 logger = logging.getLogger(__name__)
 
 
-class BaseEventHandler(metaclass=ABCMeta):
+class BaseEventHandler(ABC):
     """Base Event Handler."""
 
     def __init__(self, topics, fields):
