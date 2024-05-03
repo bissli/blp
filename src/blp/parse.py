@@ -97,17 +97,17 @@ class Parser:
     @staticmethod
     def element_as_value(element, force_string=False):
         """Convert the specified element as a python value"""
-        typ = element.datatype()
-        if typ == DataType.SEQUENCE:
+        dtype = element.datatype()
+        if dtype == DataType.SEQUENCE:
             if not force_string:
                 with contextlib.suppress(blpapi.exception.UnsupportedOperationException):
                     return Parser._sequence_as_dataframe(element)
             return Parser._sequence_as_json(element)
         if force_string:
             return libb.round_digit_string(element.getValueAsString())
-        if typ in NUMERIC_TYPES:
+        if dtype in NUMERIC_TYPES:
             return element.getValue() or np.nan
-        if typ in {DataType.DATE, DataType.DATETIME, DataType.TIME}:
+        if dtype in {DataType.DATE, DataType.DATETIME, DataType.TIME}:
             if element.isNull():
                 return pd.NaT
             v = element.getValue()
@@ -119,7 +119,7 @@ class Parser:
                 t = datetime.date.today()
                 dt = datetime.datetime(t.year, t.month, t.day, v.hour, v.minute, v.second)
                 return dt.astimezone(UTC)
-        if typ == DataType.CHOICE:
+        if dtype == DataType.CHOICE:
             logger.error('CHOICE data type needs implemented')
         return libb.round_digit_string(element.getValueAsString())
 
@@ -162,9 +162,8 @@ class Parser:
         for i, element in enumerate(elements.values()):
             if i == 0:  # Get the ordered cols and assume they are constant
                 cols = [str(_.name()) for _ in element.elements()]
-            for cidx, _ in enumerate(element.elements()):
-                element = element.getElement(cidx)
-                data[str(element.name())].append(Parser.element_as_value(element))
+            for subelement in element.elements():
+                data[str(subelement.name())].append(Parser.element_as_value(subelement))
         return pd.DataFrame(data, columns=cols)
 
     @staticmethod
