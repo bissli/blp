@@ -35,7 +35,7 @@ def empty(obj):
     return bool(obj)
 
 
-class Request(ABC):
+class BaseRequest(ABC):
     """Base Request Object"""
 
     def __init__(
@@ -113,7 +113,7 @@ class Request(ABC):
         self.response = response
 
 
-class Response(ABC):
+class BaseResponse(ABC):
     """Base class for Responses
     """
     @abstractmethod
@@ -121,7 +121,7 @@ class Response(ABC):
         pass
 
 
-class HistoricalDataResponse(Response):
+class HistoricalDataResponse(BaseResponse):
 
     def __init__(self, request):
         self.request = request
@@ -141,7 +141,7 @@ class HistoricalDataResponse(Response):
         return df
 
 
-class HistoricalDataRequest(Request):
+class HistoricalDataRequest(BaseRequest):
     """A class which manages the creation of the Bloomberg
     HistoricalDataRequest and the processing of the associated Response.
 
@@ -287,7 +287,7 @@ class HistoricalDataRequest(Request):
                 self.on_security_data_element(element)
 
 
-class ReferenceDataResponse(Response):
+class ReferenceDataResponse(BaseResponse):
 
     def __init__(self, request):
         self.request = request
@@ -309,7 +309,7 @@ class ReferenceDataResponse(Response):
         return df
 
 
-class ReferenceDataRequest(Request):
+class ReferenceDataRequest(BaseRequest):
 
     def __init__(
         self,
@@ -377,7 +377,7 @@ class ReferenceDataRequest(Request):
         field_errors and self.field_errors.extend(field_errors)
 
 
-class IntradayTickResponse(Response):
+class IntradayTickResponse(BaseResponse):
 
     def __init__(self, request):
         self.request = request
@@ -390,7 +390,7 @@ class IntradayTickResponse(Response):
             if self.request.force_string else df
 
 
-class IntradayTickRequest(Request):
+class IntradayTickRequest(BaseRequest):
     """Intraday tick request. Can submit to MSG1 as well for bond runs.
     """
     def __init__(
@@ -470,7 +470,7 @@ class IntradayTickRequest(Request):
                 self.on_tick_data(tdata.getElement('tickData'))
 
 
-class IntradayBarResponse(Response):
+class IntradayBarResponse(BaseResponse):
 
     def __init__(self, request):
         self.request = request
@@ -481,7 +481,7 @@ class IntradayBarResponse(Response):
         return df.astype(object).where(df.notna(), None) if self.request.force_string else df
 
 
-class IntradayBarRequest(Request):
+class IntradayBarRequest(BaseRequest):
 
     def __init__(
         self,
@@ -560,7 +560,7 @@ class IntradayBarRequest(Request):
                 self.on_bar_data(data.getElement('barTickData'))
 
 
-class EQSResponse(Response):
+class EQSResponse(BaseResponse):
 
     def __init__(self, request):
         self.request = request
@@ -579,7 +579,7 @@ class EQSResponse(Response):
         return df.astype(object).where(df.notna(), None) if self.request.force_string else df
 
 
-class EQSRequest(Request):
+class EQSRequest(BaseRequest):
 
     def __init__(self, name, type='GLOBAL', group='General', asof=None, language=None):
         super().__init__('//blp/refdata')
@@ -749,7 +749,7 @@ class Blp:
         }
         return '<{clz}({host}:{port}:{auth})'.format(**fmtargs)
 
-    def execute(self, request: Request) -> Response:
+    def execute(self, request: BaseRequest) -> BaseResponse:
         logger.info(f'Sending request: {repr(request)}')
         self.session.open_service(request.service_name)
         service = self.session.getService(request.service_name)
@@ -758,7 +758,7 @@ class Blp:
         request.prepare_response()
         return self._wait_for_response(request)
 
-    def _wait_for_response(self, request: Request) -> Response:
+    def _wait_for_response(self, request: BaseRequest) -> BaseResponse:
         """Waits for response after sending the request.
 
         Success response can come with a number of
@@ -979,7 +979,7 @@ class Subscription:
         self.dispatcher = dispatcher
 
     def subscribe(self, handler: BaseEventHandler, runtime=24 * 60 * 60, *args, **kwargs):
-        r"""Open subscription.
+        r"""Subscribe with a given handler
 
         Parameters
         ----------
