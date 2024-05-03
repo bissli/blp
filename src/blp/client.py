@@ -29,7 +29,7 @@ __all__ = ['Blp']
 def empty(obj):
     if isinstance(obj, Iterable):
         try:
-            return np.all(obj.isnull())
+            return np.all(obj.isna())
         except:
             return bool(obj)
     return bool(obj)
@@ -59,19 +59,20 @@ class BaseRequest(ABC):
 
     @property
     def has_exception(self):
-        return (self.raise_security_error and self.security_errors) or (self.raise_field_error and self.field_errors)
+        return (self.raise_security_error and self.security_errors) \
+            or (self.raise_field_error and self.field_errors)
 
     def raise_exception(self):
         if self.security_errors:
             msgs = ''.join([str(s) for s in self.security_errors])
             if self.raise_security_error:
                 raise Exception(msgs)
-            logger.debug('Security Errors:\n' + msgs)
+            logger.debug(f'Security Errors:\n{msgs}')
         if self.field_errors:
             msgs = ''.join([str(s) for s in self.field_errors])
             if self.raise_field_error:
                 raise Exception(msgs)
-            logger.debug('Field Errors:\n' + msgs)
+            logger.debug(f'Field Errors:\n{msgs}')
 
     @abstractmethod
     def create_request(self, service):
@@ -113,35 +114,36 @@ class BaseRequest(ABC):
 
 
 class BaseResponse(ABC):
-    """Base class for Responses"""
+    """Base class for Responses
+    """
     @abstractmethod
     def as_dataframe(self):
         pass
 
 
 class HistoricalDataResponse(BaseResponse):
+
     def __init__(self, request):
         self.request = request
         self.response_map = {}
 
-    def on_security_complete(self, sid, frame):
-        self.response_map[sid] = (
-            frame.astype(object).where(frame.notna(), None) if self.request.force_string else frame
-        )
+    def on_security_complete(self, sid, df):
+        self.response_map[sid] = df.astype(object).where(df.notna(), None) \
+            if self.request.force_string else df
 
-    def as_dictionary(self):
+    def as_dict(self):
         return self.response_map
 
     def as_dataframe(self):
         """:return: Multi-Index DataFrame"""
-        sids, frames = list(self.response_map.keys()), list(self.response_map.values())
-        frame = pd.concat(frames, keys=sids, axis=1)
-        return frame
+        sids, dfs = list(self.response_map.keys()), list(self.response_map.values())
+        df = pd.concat(dfs, keys=sids, axis=1)
+        return df
 
 
 class HistoricalDataRequest(BaseRequest):
-    """A class which manages the creation of the Bloomberg HistoricalDataRequest and
-    the processing of the associated Response.
+    """A class which manages the creation of the Bloomberg
+    HistoricalDataRequest and the processing of the associated Response.
 
     Parameters
     ----------
@@ -266,18 +268,17 @@ class HistoricalDataRequest(BaseRequest):
                 if isinstance(field_val, datetime.datetime):
                     field_val = field_val.astimezone(self.timezone)
                 dmap[f].append(field_val)
-
         if not dmap:
-            frame = pd.DataFrame(columns=self.fields)
+            df = pd.DataFrame(columns=self.fields)
         else:
             idx = dmap.pop('date')
-            frame = pd.DataFrame(dmap, columns=self.fields, index=idx)
-            frame.index.name = 'date'
-        self.response.on_security_complete(sid, frame)
+            df = pd.DataFrame(dmap, columns=self.fields, index=idx)
+            df.index.name = 'date'
+        self.response.on_security_complete(sid, df)
 
     def process_response(self, event, is_final):
         for message in Parser.message_iter(event):
-            # Single security element in historical request
+            # single security element in historical request
             element = message.getElement(Name.SECURITY_DATA)
             if Name.SECURITY_ERROR in element:
                 sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
@@ -287,6 +288,7 @@ class HistoricalDataRequest(BaseRequest):
 
 
 class ReferenceDataResponse(BaseResponse):
+
     def __init__(self, request):
         self.request = request
         self.response_map = defaultdict(dict)
@@ -294,20 +296,21 @@ class ReferenceDataResponse(BaseResponse):
     def on_security_data(self, sid, fieldmap):
         self.response_map[sid].update(fieldmap)
 
-    def as_dictionary(self):
+    def as_dict(self):
         return self.response_map
 
     def as_dataframe(self):
         """:return: Multi-Index DataFrame"""
         data = {sid: pd.Series(data) for sid, data in self.response_map.items()}
-        frame = pd.DataFrame.from_dict(data, orient='index')
-        frame = frame.reindex(self.request.fields, axis=1)  # layer in any missing fields just in case
+        df = pd.DataFrame.from_dict(data, orient='index')
+        df = df.reindex(self.request.fields, axis=1)  # layer in any missing fields just in case
         if self.request.force_string:
-            frame = frame.astype(object).where(frame.notna(), None)
-        return frame
+            df = df.astype(object).where(df.notna(), None)
+        return df
 
 
 class ReferenceDataRequest(BaseRequest):
+
     def __init__(
         self,
         sids,
@@ -319,7 +322,7 @@ class ReferenceDataRequest(BaseRequest):
         force_string=False,
         **overrides,
     ):
-        """response_type: (frame, map) how to return the results"""
+        """response_type: (df, map) how to return the results"""
         super().__init__(
             '//blp/refdata',
             raise_security_error=raise_security_error,
@@ -375,19 +378,21 @@ class ReferenceDataRequest(BaseRequest):
 
 
 class IntradayTickResponse(BaseResponse):
+
     def __init__(self, request):
         self.request = request
-        self.ticks = []  # array of dicts
+        self.ticks = []  # iterdict
 
     def as_dataframe(self):
         """Return a data frame with no set index"""
-        frame = pd.DataFrame.from_records(self.ticks)
-        return frame.astype(object).where(frame.notna(), None) if self.request.force_string else frame
+        df = pd.DataFrame.from_records(self.ticks)
+        return df.astype(object).where(df.notna(), None) \
+            if self.request.force_string else df
 
 
 class IntradayTickRequest(BaseRequest):
-    """Intraday tick request. Can submit to MSG1 as well for bond runs."""
-
+    """Intraday tick request. Can submit to MSG1 as well for bond runs.
+    """
     def __init__(
         self,
         sid,
@@ -466,16 +471,18 @@ class IntradayTickRequest(BaseRequest):
 
 
 class IntradayBarResponse(BaseResponse):
+
     def __init__(self, request):
         self.request = request
         self.bars = []  # iterdict
 
     def as_dataframe(self):
-        frame = pd.DataFrame.from_records(self.bars)
-        return frame.astype(object).where(frame.notna(), None) if self.request.force_string else frame
+        df = pd.DataFrame.from_records(self.bars)
+        return df.astype(object).where(df.notna(), None) if self.request.force_string else df
 
 
 class IntradayBarRequest(BaseRequest):
+
     def __init__(
         self,
         sid,
@@ -554,6 +561,7 @@ class IntradayBarRequest(BaseRequest):
 
 
 class EQSResponse(BaseResponse):
+
     def __init__(self, request):
         self.request = request
         self.response_map = defaultdict(dict)
@@ -561,17 +569,18 @@ class EQSResponse(BaseResponse):
     def on_security_data(self, sid, fieldmap):
         self.response_map[sid].update(fieldmap)
 
-    def as_dictionary(self):
+    def as_dict(self):
         return self.response_map
 
     def as_dataframe(self):
         """:return: Multi-Index DataFrame"""
         data = {sid: pd.Series(data) for sid, data in self.response_map.items()}
-        frame = pd.DataFrame.from_dict(data, orient='index')
-        return frame.astype(object).where(frame.notna(), None) if self.request.force_string else frame
+        df = pd.DataFrame.from_dict(data, orient='index')
+        return df.astype(object).where(df.notna(), None) if self.request.force_string else df
 
 
 class EQSRequest(BaseRequest):
+
     def __init__(self, name, type='GLOBAL', group='General', asof=None, language=None):
         super().__init__('//blp/refdata')
         self.name = name
@@ -631,14 +640,14 @@ class Session(blpapi.Session):
 
     def __init__(self, *args):
         super().__init__(*args)
-        atexit.register(self.__cleanup__)
+        atexit.register(self.__cleanup)
 
     def open_service(self, service_name):
         """Open service. Raise Exception if fails."""
         if not self.openService(service_name):
             raise RuntimeError(f'Failed to open service {service_name}.')
 
-    def __cleanup__(self):
+    def __cleanup(self):
         try:
             self.stop()
             self.destroy()
@@ -655,6 +664,7 @@ def create_session(
     event_queue_size=10000,
 ) -> Session:
     """Vanilla wrapper around Session (blpapi.Session)
+
     - eventHandler: Handler for events generated by the session.
         Takes two arguments - received event and related session
     - eventDispatcher: An optional dispatcher for events.
@@ -682,6 +692,7 @@ def create_session(
 
 class SessionFactory:
     """Session Factory"""
+
     @staticmethod
     def create(
         host='localhost',
@@ -934,7 +945,6 @@ class Subscription:
     Fields: Bloomberg will always return all subscribable fields in reach response.
         What `fields` does is specify which fields (when they change) should trigger an event.
         Internally though our event handler will filter for the fields we request.
-
     """
 
     def __init__(

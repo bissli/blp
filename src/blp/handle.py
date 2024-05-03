@@ -1,12 +1,12 @@
 import logging
 import time
 import warnings
-from abc import abstractmethod, ABC
+from abc import ABC, abstractmethod
 
 import blpapi
 import numpy as np
 import pandas as pd
-from blp.util import Name, Parser
+from blp.parse import Name, Parser
 from blpapi.event import Event
 
 logger = logging.getLogger(__name__)

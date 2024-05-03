@@ -7,19 +7,35 @@ authors = ["bissli <bissli@xyz.com>"]
 [tool.poetry.dependencies]
 python = "~3.11"
 
-blpapi = "^3.23.0"
+blpapi = { version = "^3.24.2", source = "blpapi" }
+
 pandas = "*"
-pywin32 = "^303"
+pyarrow = "*"
 
-libb-util = {git = "https://github.com/bissli/libb-util"}
+pywin32 = { version = "303", markers = "sys_platform == 'win32'" }
+pyinstaller = { extras = ["encryption"], version = "^6.1.0" }
 
-[tool.poetry.dev-dependencies]
-bump2version = "^1.0.1"
-pytest = "^7.4.3"
+libb-util = { git = "https://github.com/bissli/libb-util" }
+libb-cmd = { git = "https://github.com/bissli/libb-cmd" }
+
+jobsync = { git = "https://github.com/bissli/jobsync" }
+
+# == test
+asserts = { version = "*", optional = true }
+pytest = { version = "*", optional = true }
+pdbpp = { git = "https://github.com/pdbpp/pdbpp", optional = true }
+
+[tool.poetry.extras]
+test = [
+  "asserts",
+  "pdbpp",
+  "pytest",
+]
 
 [[tool.poetry.source]]
 name = "blpapi"
 url = "https://bcms.bloomberg.com/pip/simple"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
