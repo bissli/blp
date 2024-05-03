@@ -35,7 +35,7 @@ def empty(obj):
     return bool(obj)
 
 
-class BaseRequest(ABC):
+class Request(ABC):
     """Base Request Object"""
 
     def __init__(
@@ -113,7 +113,7 @@ class BaseRequest(ABC):
         self.response = response
 
 
-class BaseResponse(ABC):
+class Response(ABC):
     """Base class for Responses
     """
     @abstractmethod
@@ -121,7 +121,7 @@ class BaseResponse(ABC):
         pass
 
 
-class HistoricalDataResponse(BaseResponse):
+class HistoricalDataResponse(Response):
 
     def __init__(self, request):
         self.request = request
@@ -141,7 +141,7 @@ class HistoricalDataResponse(BaseResponse):
         return df
 
 
-class HistoricalDataRequest(BaseRequest):
+class HistoricalDataRequest(Request):
     """A class which manages the creation of the Bloomberg
     HistoricalDataRequest and the processing of the associated Response.
 
@@ -287,7 +287,7 @@ class HistoricalDataRequest(BaseRequest):
                 self.on_security_data_element(element)
 
 
-class ReferenceDataResponse(BaseResponse):
+class ReferenceDataResponse(Response):
 
     def __init__(self, request):
         self.request = request
@@ -309,7 +309,7 @@ class ReferenceDataResponse(BaseResponse):
         return df
 
 
-class ReferenceDataRequest(BaseRequest):
+class ReferenceDataRequest(Request):
 
     def __init__(
         self,
@@ -377,7 +377,7 @@ class ReferenceDataRequest(BaseRequest):
         field_errors and self.field_errors.extend(field_errors)
 
 
-class IntradayTickResponse(BaseResponse):
+class IntradayTickResponse(Response):
 
     def __init__(self, request):
         self.request = request
@@ -390,7 +390,7 @@ class IntradayTickResponse(BaseResponse):
             if self.request.force_string else df
 
 
-class IntradayTickRequest(BaseRequest):
+class IntradayTickRequest(Request):
     """Intraday tick request. Can submit to MSG1 as well for bond runs.
     """
     def __init__(
@@ -470,7 +470,7 @@ class IntradayTickRequest(BaseRequest):
                 self.on_tick_data(tdata.getElement('tickData'))
 
 
-class IntradayBarResponse(BaseResponse):
+class IntradayBarResponse(Response):
 
     def __init__(self, request):
         self.request = request
@@ -481,7 +481,7 @@ class IntradayBarResponse(BaseResponse):
         return df.astype(object).where(df.notna(), None) if self.request.force_string else df
 
 
-class IntradayBarRequest(BaseRequest):
+class IntradayBarRequest(Request):
 
     def __init__(
         self,
@@ -560,7 +560,7 @@ class IntradayBarRequest(BaseRequest):
                 self.on_bar_data(data.getElement('barTickData'))
 
 
-class EQSResponse(BaseResponse):
+class EQSResponse(Response):
 
     def __init__(self, request):
         self.request = request
@@ -579,7 +579,7 @@ class EQSResponse(BaseResponse):
         return df.astype(object).where(df.notna(), None) if self.request.force_string else df
 
 
-class EQSRequest(BaseRequest):
+class EQSRequest(Request):
 
     def __init__(self, name, type='GLOBAL', group='General', asof=None, language=None):
         super().__init__('//blp/refdata')
@@ -749,7 +749,7 @@ class Blp:
         }
         return '<{clz}({host}:{port}:{auth})'.format(**fmtargs)
 
-    def execute(self, request: BaseRequest) -> BaseResponse:
+    def execute(self, request: Request) -> Response:
         logger.info(f'Sending request: {repr(request)}')
         self.session.open_service(request.service_name)
         service = self.session.getService(request.service_name)
@@ -758,7 +758,7 @@ class Blp:
         request.prepare_response()
         return self._wait_for_response(request)
 
-    def _wait_for_response(self, request: BaseRequest) -> BaseResponse:
+    def _wait_for_response(self, request: Request) -> Response:
         """Waits for response after sending the request.
 
         Success response can come with a number of

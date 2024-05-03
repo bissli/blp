@@ -6,9 +6,11 @@ from dateutil.relativedelta import relativedelta
 
 
 def banner(msg):
+    print()
     print('*' * 25)
     print(msg)
     print('*' * 25)
+    print()
 
 
 d = pd.date_range(start=datetime.today() - relativedelta(days=4), end=datetime.today(), freq='B')
