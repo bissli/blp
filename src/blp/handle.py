@@ -8,8 +8,11 @@ import numpy as np
 import pandas as pd
 from blp.parse import Name, Parser
 from blpapi.event import Event
+from natsort import index_natsorted
 
 logger = logging.getLogger(__name__)
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
 class BaseEventHandler(ABC):
@@ -114,20 +117,25 @@ class SimpleEventHandler(BaseEventHandler):
 class LoggingEventHandler(BaseEventHandler):
     """Basic dataset logging event handler"""
 
-    def __init__(self, topics, fields):
+    def __init__(self, topics, fields, index: dict = None, sort_by: str =
+                 None, sort_mod: callable = lambda x: x):
         super().__init__(topics, fields)
-
-        # create dataframe grid
         nrows, ncols = len(self.topics), len(self.fields)
         vals = np.repeat(np.nan, nrows * ncols).reshape((nrows, ncols))
-        self.frame = pd.DataFrame(vals, columns=self.fields, index=self.topics)
+        self.frame = pd.DataFrame(vals, columns=self.fields,
+                                  index=[(index or {}).get(t, t) for t in self.topics])
+        self.sort_by = sort_by
+        self.sort_mod = sort_mod
 
     def emit(self, topic, parsed):
         logger.debug(f'Received event for {time.strftime("%Y/%m/%d %X")}: {topic}')
         ridx = self.topics.index(topic)
         for cidx, field in enumerate(self.fields):
             if field in parsed:
-                with warnings.catch_warnings():
-                    warnings.simplefilter(action='ignore', category=FutureWarning)
-                    self.frame.iloc[ridx, cidx] = parsed[field]
-        logger.info(self.frame)
+                self.frame.iloc[ridx, cidx] = parsed[field]
+        df = self.frame
+        if self.sort_by:
+            sortable = [self.sort_mod(x) for x in df[self.sort_by]]
+            sort_key = lambda x: np.argsort(index_natsorted(sortable))
+            df = self.frame.sort_values(by=self.sort_by, key=sort_key)
+        logger.info(df.to_string())

@@ -11,6 +11,8 @@ blpapi = { version = "^3.24.2", source = "blpapi" }
 
 pandas = "*"
 pyarrow = "*"
+natsort = "*"
+numpy = "*"
 
 pywin32 = { version = "303", markers = "sys_platform == 'win32'" }
 pyinstaller = { extras = ["encryption"], version = "^6.1.0" }
