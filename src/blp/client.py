@@ -2,6 +2,7 @@
 See HistoricalDataResponse
 """
 import atexit
+import contextlib
 import datetime
 import logging
 from abc import ABC, abstractmethod
@@ -651,19 +652,17 @@ class Session(blpapi.Session):
 
     def __init__(self, *args):
         super().__init__(*args)
-        atexit.register(self._cleanup)
+        atexit.register(self.cleanup)
 
     def open_service(self, service_name):
         """Open service. Raise Exception if fails."""
         if not self.openService(service_name):
             raise RuntimeError(f'Failed to open service {service_name}.')
 
-    def _cleanup(self):
-        try:
+    def cleanup(self):
+        with contextlib.suppress(Exception):
             self.stop()
             self.destroy()
-        except:
-            pass
 
 
 def create_session(
@@ -750,6 +749,15 @@ class Blp:
         self.port = port
         self.auth = auth
         self.session = session or SessionFactory.create(host, port, auth)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_ty, exc_val, tb):
+        logger.debug('Exiting Blp context')
+        if exc_ty:
+            logger.exception(exc_val)
+        self.session.cleanup()
 
     def __repr__(self):
         fmtargs = {
@@ -942,13 +950,6 @@ class Blp:
     def get_screener(self, name, group='General', type='GLOBAL', asof=None, language=None):
         req = EQSRequest(name, type=type, group=group, asof=asof, language=language)
         return self.execute(req)
-
-    def destroy(self):
-        try:
-            self.session.stop()
-            self.session.destroy()
-        except:
-            pass
 
 
 class Subscription:
