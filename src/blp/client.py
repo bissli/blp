@@ -114,10 +114,14 @@ class BaseRequest(ABC):
 
 
 class BaseResponse(ABC):
-    """Base class for Responses
-    """
+    """Base class for Responses"""
+
     @abstractmethod
     def as_dataframe(self):
+        pass
+
+    @abstractmethod
+    def as_dict(self):
         pass
 
 
@@ -142,27 +146,28 @@ class HistoricalDataResponse(BaseResponse):
 
 
 class HistoricalDataRequest(BaseRequest):
-    """A class which manages the creation of the Bloomberg
-    HistoricalDataRequest and the processing of the associated Response.
+    """"
+    Manages the creation and processing of Bloomberg HistoricalDataRequest.
 
     Parameters
     ----------
-    sids: bbg security identifier(s)
-    fields: bbg field name(s)
-    start: (optional) date, date string , or None. If None, defaults to 1 year ago.
-    end: (optional) date, date string, or None. If None, defaults to today.
-    period: (optional) periodicity of data [DAILY, WEEKLY, MONTHLY, QUARTERLY, SEMI_ANNUALLY, YEARLY]
-    raise_security_error: If True, raise exceptions caused by invalid sids
-    raise_field_error: If True, raise exceptions caused by invalid fields
-    period_adjustment: (ACTUAL, CALENDAR, FISCAL)
-                        Set the frequency and calendar type of the output
-    currency: ISO Code
-              Amends the value from local to desired currency
-    override_option: (OVERRIDE_OPTION_CLOSE | OVERRIDE_OPTION_GPA)
-    pricing_option: (PRICING_OPTION_PRICE | PRICING_OPTION_YIELD)
-    non_trading_day_fill_option: (NON_TRADING_WEEKDAYS | ALL_CALENDAR_DAYS | ACTIVE_DAYS_ONLY)
-    non_trading_day_fill_method: (PREVIOUS_VALUE | NIL_VALUE)
-    calendar_code_override: 2 letter county iso code
+    sids: Bloomberg security identifier(s).
+    fields: Bloomberg field name(s).
+    start: Optional. Date or date string. Defaults to 1 year ago if None.
+    end: Optional. Date or date string. Defaults to today if None.
+    period: Optional. Periodicity of data (DAILY, WEEKLY, MONTHLY, QUARTERLY,
+      SEMI_ANNUALLY, YEARLY).
+    raise_security_error: If True, raises exceptions for invalid sids.
+    raise_field_error: If True, raises exceptions for invalid fields.
+    period_adjustment: Frequency and calendar type of the output (ACTUAL,
+      CALENDAR, FISCAL).
+    currency: ISO Code. Converts value from local to specified currency.
+    override_option: OVERRIDE_OPTION_CLOSE or OVERRIDE_OPTION_GPA.
+    pricing_option: PRICING_OPTION_PRICE or PRICING_OPTION_YIELD.
+    non_trading_day_fill_option: NON_TRADING_WEEKDAYS, ALL_CALENDAR_DAYS, or
+      ACTIVE_DAYS_ONLY.
+    non_trading_day_fill_method: PREVIOUS_VALUE or NIL_VALUE.
+    calendar_code_override: 2-letter country ISO code.
     """
 
     def __init__(
@@ -383,6 +388,9 @@ class IntradayTickResponse(BaseResponse):
         self.request = request
         self.ticks = []  # iterdict
 
+    def as_dict(self):
+        raise NotImplementedError('Needs to be implemented')
+
     def as_dataframe(self):
         """Return a data frame with no set index"""
         df = pd.DataFrame.from_records(self.ticks)
@@ -475,6 +483,9 @@ class IntradayBarResponse(BaseResponse):
     def __init__(self, request):
         self.request = request
         self.bars = []  # iterdict
+
+    def as_dict(self):
+        raise NotImplementedError('Needs to be implemented')
 
     def as_dataframe(self):
         df = pd.DataFrame.from_records(self.bars)
@@ -640,14 +651,14 @@ class Session(blpapi.Session):
 
     def __init__(self, *args):
         super().__init__(*args)
-        atexit.register(self.__cleanup)
+        atexit.register(self._cleanup)
 
     def open_service(self, service_name):
         """Open service. Raise Exception if fails."""
         if not self.openService(service_name):
             raise RuntimeError(f'Failed to open service {service_name}.')
 
-    def __cleanup(self):
+    def _cleanup(self):
         try:
             self.stop()
             self.destroy()
@@ -1004,10 +1015,10 @@ class Subscription:
             subscriptions.add(topic, self.fields, options, blpapi.CorrelationId(topic))
         session.subscribe(subscriptions)
 
-        _runtime = libb.NonBlockingDelay()
-        _runtime.delay(runtime)
+        delay = libb.NonBlockingDelay()
+        delay.delay(runtime)
 
-        while not _runtime.timeout():
+        while not delay.timeout():
             continue
 
         logger.warning('Subscription runtime expired. Unsubscribing...')

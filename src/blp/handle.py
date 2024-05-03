@@ -34,19 +34,19 @@ class BaseEventHandler(ABC):
             event_type = event.eventType()
             if event_type == Event.SUBSCRIPTION_DATA:
                 logger.debug('next(): subscription data')
-                self.__data_event(event, _)
+                self._data_event(event, _)
                 return
             if event_type == Event.SUBSCRIPTION_STATUS:
                 logger.debug('next(): subscription status')
-                self.__status_event(event, _)
+                self._status_event(event, _)
                 return
             if event_type == Event.TIMEOUT:
                 return
-            self.__misc_event(event, _)
+            self._misc_event(event, _)
         except blpapi.Exception as exception:
             logger.error(f'Failed to process event {event}: {exception}')
 
-    def __status_event(self, event, _):
+    def _status_event(self, event, _):
         for message in Parser.message_iter(event):
             topic = message.correlationId().value()
             match message.messageType():
@@ -57,7 +57,7 @@ class BaseEventHandler(ABC):
                     # Subscription can be terminated if the session identity is revoked.
                     logger.error(f'Subscription for {topic} TERMINATED')
 
-    def __data_event(self, event, _):
+    def _data_event(self, event, _):
         """Return a full mapping of fields to parsed values"""
         for message in Parser.message_iter(event):
             parsed = {}
@@ -68,9 +68,9 @@ class BaseEventHandler(ABC):
                     parsed[field] = val
             self.emit(topic, parsed)
 
-    def __misc_event(self, event, _):
-        for msg in event:
-            match msg.messageType():
+    def _misc_event(self, event, _):
+        for message in event:
+            match message.messageType():
                 case Name.SLOW_CONSUMER_WARNING:
                     logger.warning(
                         f'{Name.SLOW_CONSUMER_WARNING} - The event queue is '
@@ -89,8 +89,8 @@ class BaseEventHandler(ABC):
                         + 'it is now safe to continue as normal.\n'
                     )
                 case Name.DATA_LOSS:
-                    logger.warning(msg)
-                    topic = msg.correlationId().value()
+                    logger.warning(message)
+                    topic = message.correlationId().value()
                     logger.warning(
                         f'{Name.DATA_LOSS} - The application is too slow to '
                         + 'process events and the event queue is overflowing. '

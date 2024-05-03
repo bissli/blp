@@ -4,3 +4,4 @@ __pycache__/
 *.spec
 .python-version
 activate.ps1
+.root
