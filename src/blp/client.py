@@ -13,7 +13,7 @@ import pandas as pd
 import pendulum
 import win32api
 import win32con
-from blp.handle import BaseEventHandler, LoggingEventHandler
+from blp.handle import BaseEventHandler, LoggingDataFrameEventHandler
 from blp.parse import Name, Parser
 from blpapi.event import Event
 
@@ -965,12 +965,12 @@ class Blp:
         auth='AuthenticationType=OS_LOGON',
         dispatcher=None,
         runtime=24 * 60 * 60,
-        handler=LoggingEventHandler,
+        handler=LoggingDataFrameEventHandler,
         handler_options={},  # noqa
     ):
         """Create subscription request"""
         sub = Subscription(topics=topics, fields=fields)
-        sub.subscribe(handler=LoggingEventHandler, runtime=runtime,
+        sub.subscribe(handler=LoggingDataFrameEventHandler, runtime=runtime,
                       **handler_options)
 
 

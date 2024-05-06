@@ -1,3 +1,5 @@
+"""Subscription event handlers
+"""
 import datetime
 import logging
 import time
@@ -119,11 +121,17 @@ class SimpleEventHandler(BaseEventHandler):
         logger.info(f'{topic}: {parsed}')
 
 
-class LoggingEventHandler(BaseEventHandler):
-    """Basic dataset logging event handler"""
+class BaseDataFrameEventHandler(BaseEventHandler):
+    """Store as DataFrame"""
 
-    def __init__(self, topics, fields, index: dict = None, sort_by: str =
-                 None, sort_mod: callable = lambda x: x):
+    def __init__(
+        self,
+        topics,
+        fields,
+        index: dict = None,
+        sort_by: str = None,
+        sort_mod: callable = lambda x: x,
+    ):
         super().__init__(topics, fields)
         nrows, ncols = len(self.topics), len(self.fields)
         vals = np.repeat(np.nan, nrows * ncols).reshape((nrows, ncols))
@@ -138,9 +146,19 @@ class LoggingEventHandler(BaseEventHandler):
         for cidx, field in enumerate(self.fields):
             if field in parsed:
                 self.frame.iloc[ridx, cidx] = parsed[field]
-        df = self.frame
-        if self.sort_by:
-            sortable = [self.sort_mod(x) for x in df[self.sort_by]]
-            sort_key = lambda x: np.argsort(index_natsorted(sortable))
-            df = self.frame.sort_values(by=self.sort_by, key=sort_key)
+
+
+class LoggingDataFrameEventHandler(BaseDataFrameEventHandler):
+    """Basic dataset logging event handler"""
+
+    def sort_frame(self, sort_by, sort_mod):
+        if not sort_by:
+            return self.frame
+        sortable = [sort_mod(x) for x in self.frame[sort_by]]
+        sort_key = lambda x: np.argsort(index_natsorted(sortable))
+        return self.frame.sort_values(by=sort_by, key=sort_key)
+
+    def emit(self, topic, parsed):
+        super().emit(topic, parsed)
+        df = self.sort_frame(self.sort_by, self.sort_mod)
         logger.info(df.to_string())
