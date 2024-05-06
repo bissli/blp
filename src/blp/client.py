@@ -7,33 +7,40 @@ import datetime
 import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Iterable
 
 import blpapi
-import numpy as np
 import pandas as pd
-import pytz
+import pendulum
 import win32api
 import win32con
 from blp.handle import BaseEventHandler
 from blp.parse import Name, Parser
 from blpapi.event import Event
-from dateutil.relativedelta import relativedelta
 
-import libb
+from date import UTC, DateTime
+from libb import NonBlockingDelay, is_null
 
 logger = logging.getLogger(__name__)
 
 __all__ = ['Blp', 'Subscription']
 
 
-def empty(obj):
-    if isinstance(obj, Iterable):
-        try:
-            return np.all(obj.isna())
-        except:
-            return bool(obj)
-    return bool(obj)
+def parse_datetimerange(start, end):
+    """Maintain UTC timezone for input datetime parameters
+    """
+    if is_null(end):
+        end = DateTime.now(UTC)
+    elif isinstance(end, datetime.datetime):
+        end = end.in_timezone(UTC) if end.tzinfo() else end.replace(tzinfo=UTC)
+    else:
+        end = DateTime.parse(end).replace(tzinfo=UTC)
+    if is_null(start):
+        start = end.subtract(days=1)
+    elif isinstance(start, datetime.datetime):
+        start = start.in_timezone(UTC) if start.tzinfo() else start.replace(tzinfo=UTC)
+    else:
+        start = DateTime.parse(start).replace(tzinfo=UTC)
+    return start, end
 
 
 class BaseRequest(ABC):
@@ -175,8 +182,8 @@ class HistoricalDataRequest(BaseRequest):
         self,
         sids,
         fields,
-        start=None,
-        end=None,
+        start:datetime.datetime = None,
+        end:datetime.datetime = None,
         period=None,
         raise_security_error=False,
         raise_field_error=False,
@@ -207,8 +214,7 @@ class HistoricalDataRequest(BaseRequest):
         self.is_single_field = is_single_field = isinstance(fields, str)
         self.sids = [sids] if is_single_sid else list(sids)
         self.fields = [fields] if is_single_field else list(fields)
-        self.end = end = pd.to_datetime(end) if empty(end) else pd.Timestamp.now()
-        self.start = pd.to_datetime(start) if empty(start) else end + relativedelta(years=-1)
+        self.start, self.end = parse_datetimerange(start, end)
         self.period = period
         self.period_adjustment = period_adjustment
         self.currency = currency
@@ -272,7 +278,7 @@ class HistoricalDataRequest(BaseRequest):
             for f in ['date'] + self.fields:
                 field_val = Parser.get_subelement_value(pt, f, self.force_string)
                 if isinstance(field_val, datetime.datetime):
-                    field_val = field_val.astimezone(self.timezone)
+                    field_val = field_val.in_timezone(self.timezone)
                 dmap[f].append(field_val)
         if not dmap:
             df = pd.DataFrame(columns=self.fields)
@@ -340,7 +346,7 @@ class ReferenceDataRequest(BaseRequest):
         self.sids = [sids] if isinstance(sids, str) else sids
         self.fields = [fields] if isinstance(fields, str) else fields
         self.return_formatted_value = return_formatted_value
-        self.timezone = pytz.timezone(timezone)
+        self.timezone = pendulum.tz.Timezone(timezone)
         self.overrides = overrides
 
     def __repr__(self):
@@ -376,7 +382,7 @@ class ReferenceDataRequest(BaseRequest):
         sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
         field_data = Parser.get_subelement_values(fields, self.fields, self.force_string)
-        field_data = [x.astimezone(self.timezone) if isinstance(x, datetime.datetime) else x for x in field_data]
+        field_data = [x.in_timezone(self.timezone) if isinstance(x, datetime.datetime) else x for x in field_data]
         assert len(field_data) == len(self.fields), 'Field length must match data length'
         self.response.on_security_data(sid, dict(list(zip(self.fields, field_data))))
         field_errors = Parser.get_field_errors(element)
@@ -405,8 +411,8 @@ class IntradayTickRequest(BaseRequest):
     def __init__(
         self,
         sid,
-        start=None,
-        end=None,
+        start: datetime.datetime = None,
+        end: datetime.datetime = None,
         events=('TRADE', 'BID', 'ASK', 'BID_BEST', 'ASK_BEST', 'MID_PRICE', 'AT_TRADE', 'BEST_BID', 'BEST_ASK'),
         include_condition_codes=None,
         include_nonplottable_events=None,
@@ -434,8 +440,7 @@ class IntradayTickRequest(BaseRequest):
         self.include_action_codes = include_action_codes
         self.include_indicator_codes = include_indicator_codes
         self.include_trade_time = include_trade_time
-        self.end = end = pd.to_datetime(end) if end else pd.Timestamp.now()
-        self.start = pd.to_datetime(start) if start else end + relativedelta(days=-1)
+        self.start, self.end = parse_datetimerange(start, end)
 
     def __repr__(self):
         fmtargs = {'clz': self.__class__.__name__, 'sid': self.sid, 'events': ','.join(self.events)}
@@ -498,8 +503,8 @@ class IntradayBarRequest(BaseRequest):
     def __init__(
         self,
         sid,
-        start=None,
-        end=None,
+        start:datetime.datetime = None,
+        end:datetime.datetime = None,
         event=('TRADE', 'BID', 'ASK', 'BID_BEST', 'ASK_BEST', 'BEST_BID', 'BEST_ASK'),
         interval=None,
         gap_fill_initial_bar=None,
@@ -526,8 +531,7 @@ class IntradayBarRequest(BaseRequest):
         self.adjustment_abnormal = adjustment_abnormal
         self.adjustment_split = adjustment_split
         self.adjustment_follow_DPDF = adjustment_follow_DPDF
-        self.end = end = pd.to_datetime(end) if end else pd.Timestamp.now()
-        self.start = pd.to_datetime(start) if start else end + relativedelta(hours=-1)
+        self.start, self.end = parse_datetimerange(start, end)
 
     def __repr__(self):
         fmtargs = {
@@ -810,8 +814,8 @@ class Blp:
         self,
         sids,
         flds,
-        start=None,
-        end=None,
+        start:datetime.datetime = None,
+        end:datetime.datetime = None,
         period=None,
         raise_security_error=False,
         raise_field_error=False,
@@ -881,8 +885,8 @@ class Blp:
         self,
         sid,
         events=None,
-        start=None,
-        end=None,
+        start:datetime.datetime = None,
+        end:datetime.datetime = None,
         include_condition_codes=None,
         include_nonplottable_events=None,
         include_exchange_codes=None,
@@ -922,8 +926,8 @@ class Blp:
         self,
         sid,
         event='TRADE',
-        start=None,
-        end=None,
+        start:datetime.datetime = None,
+        end:datetime.datetime = None,
         interval=None,
         gap_fill_initial_bar=None,
         return_eids=None,
@@ -1016,7 +1020,7 @@ class Subscription:
             subscriptions.add(topic, self.fields, options, blpapi.CorrelationId(topic))
         session.subscribe(subscriptions)
 
-        delay = libb.NonBlockingDelay()
+        delay = NonBlockingDelay()
         delay.delay(runtime)
 
         while not delay.timeout():

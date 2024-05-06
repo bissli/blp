@@ -7,10 +7,10 @@ from collections import defaultdict, namedtuple
 import blpapi
 import numpy as np
 import pandas as pd
-import pytz
 from blpapi.datatype import DataType
 
 import libb
+from date import UTC, Date, DateTime
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,6 @@ FieldError = namedtuple(
     Name.FIELD_ERROR,
     [Name.SECURITY, Name.FIELD, Name.CATEGORY, Name.MESSAGE, Name.SUBCATEGORY],
 )
-
-UTC = pytz.timezone('UTC')
 
 NUMERIC_TYPES = (
     DataType.BOOL, DataType.CHAR, DataType.BYTE, DataType.INT32,
@@ -85,7 +83,7 @@ class Parser:
     def get_subelement_value(element, name, force_string=False):
         """Return the value of the child element with name in the parent Element"""
         if name not in element:
-            logger.error(f'Failed to find child element {name} in parent {element}')
+            logger.warning(f'Failed to find child element {name} in parent {element}')
             return np.nan
         return Parser.element_as_value(element.getElement(name), force_string)
 
@@ -111,16 +109,15 @@ class Parser:
             if element.isNull():
                 return pd.NaT
             v = element.getValue()
-            if isinstance(v, datetime.date):
-                return v
             if isinstance(v, datetime.datetime):
-                return v.astimezone(UTC)
+                return DateTime.parse(v).replace(tzinfo=UTC)
             if isinstance(v, datetime.time):
-                t = datetime.date.today()
-                dt = datetime.datetime(t.year, t.month, t.day, v.hour, v.minute, v.second)
-                return dt.astimezone(UTC)
+                t = Date.today()
+                return DateTime(t.year, t.month, t.day, v.hour, v.minute, v.second, tzinfo=UTC)
+            if isinstance(v, datetime.date):
+                return Date.parse(v)
         if dtype == DataType.CHOICE:
-            logger.error('CHOICE data type needs implemented')
+            logger.warning('CHOICE data type needs implemented')
         return libb.round_digit_string(element.getValueAsString())
 
     #
