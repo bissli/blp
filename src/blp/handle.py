@@ -1,3 +1,4 @@
+import datetime
 import logging
 import time
 import warnings
@@ -9,6 +10,8 @@ import pandas as pd
 from blp.parse import Name, Parser
 from blpapi.event import Event
 from natsort import index_natsorted
+
+from date import LCL
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,8 @@ class BaseEventHandler(ABC):
             for field in self.fields:
                 if field.upper() in message:
                     val = Parser.get_subelement_value(message, field.upper())
+                    if isinstance(val, datetime.datetime):
+                        val = val.replace(tzinfo=LCL)
                     parsed[field] = val
             self.emit(topic, parsed)
 
