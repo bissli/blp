@@ -13,7 +13,7 @@ import pandas as pd
 import pendulum
 import win32api
 import win32con
-from blp.handle import BaseEventHandler
+from blp.handle import BaseEventHandler, LoggingEventHandler
 from blp.parse import Name, Parser
 from blpapi.event import Event
 
@@ -22,7 +22,7 @@ from libb import NonBlockingDelay, is_null
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['Blp', 'Subscription']
+__all__ = ['Blp']
 
 
 def parse_datetimerange(start, end):
@@ -955,6 +955,24 @@ class Blp:
         req = EQSRequest(name, type=type, group=group, asof=asof, language=language)
         return self.execute(req)
 
+    def subscribe(
+        self,
+        topics,
+        fields,
+        interval=0,
+        host='localhost',
+        port=8194,
+        auth='AuthenticationType=OS_LOGON',
+        dispatcher=None,
+        runtime=24 * 60 * 60,
+        handler=LoggingEventHandler,
+        handler_options={},  # noqa
+    ):
+        """Create subscription request"""
+        sub = Subscription(topics=topics, fields=fields)
+        sub.subscribe(handler=LoggingEventHandler, runtime=runtime,
+                      **handler_options)
+
 
 class Subscription:
     """
@@ -994,7 +1012,7 @@ class Subscription:
         self.auth = auth
         self.dispatcher = dispatcher
 
-    def subscribe(self, handler: BaseEventHandler, runtime=24 * 60 * 60, *args, **kwargs):
+    def subscribe(self, handler: BaseEventHandler, runtime=24 * 60 * 60, **kwargs):
         r"""Subscribe with a given handler
 
         Parameters
@@ -1010,7 +1028,7 @@ class Subscription:
         Service    Prefix   Instrument           Suffix
 
         """
-        _handler = handler(self.topics, self.fields, *args, **kwargs)
+        _handler = handler(self.topics, self.fields, **kwargs)
         session = SessionFactory.create(self.host, self.port, self.auth, _handler, self.dispatcher)
         session.open_service('//blp/mktdata')
 
