@@ -124,21 +124,12 @@ class SimpleEventHandler(BaseEventHandler):
 class BaseDataFrameEventHandler(BaseEventHandler):
     """Store as DataFrame"""
 
-    def __init__(
-        self,
-        topics,
-        fields,
-        index: dict = None,
-        sort_by: str = None,
-        sort_mod: callable = lambda x: x,
-    ):
+    def __init__(self, topics: list, fields: list, /, index: list = None):
         super().__init__(topics, fields)
+        self.index = index
         nrows, ncols = len(self.topics), len(self.fields)
         vals = np.repeat(np.nan, nrows * ncols).reshape((nrows, ncols))
-        self.frame = pd.DataFrame(vals, columns=self.fields,
-                                  index=[(index or {}).get(t, t) for t in self.topics])
-        self.sort_by = sort_by
-        self.sort_mod = sort_mod
+        self.frame = pd.DataFrame(vals, columns=self.fields)
 
     def emit(self, topic, parsed):
         logger.debug(f'Received event for {time.strftime("%Y/%m/%d %X")}: {topic}')
@@ -151,14 +142,27 @@ class BaseDataFrameEventHandler(BaseEventHandler):
 class LoggingDataFrameEventHandler(BaseDataFrameEventHandler):
     """Basic dataset logging event handler"""
 
-    def sort_frame(self, sort_by, sort_mod):
-        if not sort_by:
-            return self.frame
-        sortable = [sort_mod(x) for x in self.frame[sort_by]]
-        sort_key = lambda x: np.argsort(index_natsorted(sortable))
-        return self.frame.sort_values(by=sort_by, key=sort_key)
+    def ordering_datetime_modifier(self, x):
+        """Place anything not parsed at the beginning
+        Replace sort_mod perhaps with this if type is datetime
+        """
+        parsed = DateTime.parse(x)
+        if not isinstance(parsed, DateTime):
+            parsed = DateTime.now().start_of('day')
+        return parsed
+
+    def sorted(self):
+        df = self.frame.copy(deep=True)
+        for col in (self.index or []):
+            if isinstance(df.dtypes[col], pd.Timestamp):
+                sort_mod = self.ordering_datetime_modifier
+            else:
+                sort_mod = lambda x: x
+            sortable = [sort_mod(x) for x in df[col]]
+            sort_key = lambda x: np.argsort(index_natsorted(sortable))
+            df = df.sort_values(by=col, key=sort_key)
+        return df
 
     def emit(self, topic, parsed):
         super().emit(topic, parsed)
-        df = self.sort_frame(self.sort_by, self.sort_mod)
-        logger.info(df.to_string())
+        logger.info(self.sorted().to_string())

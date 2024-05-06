@@ -964,14 +964,14 @@ class Blp:
         port=8194,
         auth='AuthenticationType=OS_LOGON',
         dispatcher=None,
-        runtime=24 * 60 * 60,
+        runtime=24*60*60,
         handler=LoggingDataFrameEventHandler,
         handler_options={},  # noqa
     ):
         """Create subscription request"""
-        sub = Subscription(topics=topics, fields=fields)
-        sub.subscribe(handler=LoggingDataFrameEventHandler, runtime=runtime,
-                      **handler_options)
+        sub = Subscription(topics=topics, fields=fields, interval=interval,
+                           host=host, port=port, auth=auth, dispatcher=dispatcher)
+        sub.subscribe(runtime=runtime, handler=handler, **handler_options)
 
 
 class Subscription:
