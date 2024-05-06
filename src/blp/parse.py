@@ -83,7 +83,7 @@ class Parser:
     def get_subelement_value(element, name, force_string=False):
         """Return the value of the child element with name in the parent Element"""
         if name not in element:
-            logger.warning(f'Failed to find child element {name} in parent {element}')
+            logger.debug(f'Response did not contain field {name}')
             return np.nan
         return Parser.element_as_value(element.getElement(name), force_string)
 
