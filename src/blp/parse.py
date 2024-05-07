@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from blpapi.datatype import DataType
 
-import libb
+from libb import round_digit_string, underscore_to_camelcase
 from date import UTC, Date, DateTime
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class NameType(type):
     def __getattribute__(cls, name):
-        _name = libb.underscore_to_camelcase(name)
+        _name = underscore_to_camelcase(name)
         return blpapi.Name.findName(_name) or blpapi.Name(_name)
 
 
@@ -102,7 +102,7 @@ class Parser:
                     return Parser._sequence_as_dataframe(element)
             return Parser._sequence_as_json(element)
         if force_string:
-            return libb.round_digit_string(element.getValueAsString())
+            return round_digit_string(element.getValueAsString())
         if dtype in NUMERIC_TYPES:
             return element.getValue() or np.nan
         if dtype in {DataType.DATE, DataType.DATETIME, DataType.TIME}:
@@ -118,7 +118,7 @@ class Parser:
                 return Date.parse(v)
         if dtype == DataType.CHOICE:
             logger.warning('CHOICE data type needs implemented')
-        return libb.round_digit_string(element.getValueAsString())
+        return round_digit_string(element.getValueAsString())
 
     #
     # error getters
@@ -166,10 +166,9 @@ class Parser:
     @staticmethod
     def _sequence_as_json(elements):
         data = []
-        for k, _ in enumerate(elements.values()):
-            element = elements.getValueAsElement(k)
+        for element in elements.values():
             for subelement in element.elements():
-                d = {str(subelement.name()): libb.round_digit_string(subelement.getValueAsString())}
+                d = {str(subelement.name()): round_digit_string(subelement.getValueAsString())}
                 data += [d]
         return json.dumps(data) if data else ''
 
