@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 from blpapi.datatype import DataType
 
+from date import LCL, Date, DateTime, Time
 from libb import round_digit_string, underscore_to_camelcase
-from date import UTC, Date, DateTime
 
 logger = logging.getLogger(__name__)
 
@@ -105,17 +105,21 @@ class Parser:
             return round_digit_string(element.getValueAsString())
         if dtype in NUMERIC_TYPES:
             return element.getValue() or np.nan
-        if dtype in {DataType.DATE, DataType.DATETIME, DataType.TIME}:
+        if dtype == DataType.DATE:
             if element.isNull():
                 return pd.NaT
-            v = element.getValue()
-            if isinstance(v, datetime.datetime):
-                return DateTime.parse(v).replace(tzinfo=UTC)
-            if isinstance(v, datetime.time):
-                t = Date.today()
-                return DateTime(t.year, t.month, t.day, v.hour, v.minute, v.second, tzinfo=UTC)
-            if isinstance(v, datetime.date):
-                return Date.parse(v)
+            # parsing a datetime.date object
+            return Date.parse(element.getValue())
+        if dtype in {DataType.DATETIME, DataType.TIME}:
+            if element.isNull():
+                return pd.NaT
+            obj = element.getValue()
+            if isinstance(obj, datetime.time):
+                # parsing datetime.time with no tzinfo
+                return Time.parse(obj).replace(tzinfo=LCL)
+            if isinstance(obj, datetime.datetime):
+                # parsing datetime.datetime with no tzinfo
+                return DateTime.parse(obj).replace(tzinfo=LCL)
         if dtype == DataType.CHOICE:
             logger.warning('CHOICE data type needs implemented')
         return round_digit_string(element.getValueAsString())
