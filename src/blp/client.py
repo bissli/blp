@@ -11,13 +11,14 @@ from collections import defaultdict
 import blpapi
 import pandas as pd
 import pendulum
+import pyarrow as pa
 import win32api
 import win32con
 from blp.handle import BaseEventHandler, LoggingDataFrameEventHandler
 from blp.parse import Name, Parser
 from blpapi.event import Event
 
-from date import UTC, DateTime
+from date import LCL, DateTime
 from libb import NonBlockingDelay, is_null
 
 logger = logging.getLogger(__name__)
@@ -26,20 +27,21 @@ __all__ = ['Blp']
 
 
 def parse_datetimerange(start, end):
-    """Maintain UTC timezone for input datetime parameters
+    """Only Reference Request has TZ parameter. Assume terminal is in local
+    time. Add tzinfo to dates (will be added in response as well).
     """
     if is_null(end):
-        end = DateTime.now(UTC)
+        end = DateTime.now(LCL)
     elif isinstance(end, datetime.datetime):
-        end = end.in_timezone(UTC) if end.tzinfo() else end.replace(tzinfo=UTC)
+        end = end.replace(tzinfo=LCL)
     else:
-        end = DateTime.parse(end).replace(tzinfo=UTC)
+        end = DateTime.parse(end).replace(tzinfo=LCL)
     if is_null(start):
         start = end.subtract(days=1)
     elif isinstance(start, datetime.datetime):
-        start = start.in_timezone(UTC) if start.tzinfo() else start.replace(tzinfo=UTC)
+        start = start.replace(tzinfo=LCL)
     else:
-        start = DateTime.parse(start).replace(tzinfo=UTC)
+        start = DateTime.parse(start).replace(tzinfo=LCL)
     return start, end
 
 
@@ -330,7 +332,7 @@ class ReferenceDataRequest(BaseRequest):
         raise_security_error=False,
         raise_field_error=False,
         return_formatted_value=None,
-        timezone='UTC',
+        timezone: str = LCL.name,
         force_string=False,
         **overrides,
     ):
@@ -366,7 +368,7 @@ class ReferenceDataRequest(BaseRequest):
         [request.append('securities', sec) for sec in self.sids]
         [request.append('fields', fld) for fld in self.fields]
         self.set_flag(request, self.return_formatted_value, 'returnFormattedValue')
-        self.set_flag(request, True, 'useUTCTime')
+        self.set_flag(request, False, 'useUTCTime')
         self.apply_overrides(request, self.overrides)
         return request
 
