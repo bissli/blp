@@ -41,11 +41,11 @@ class BaseEventHandler(ABC):
         try:
             event_type = event.eventType()
             if event_type == Event.SUBSCRIPTION_DATA:
-                logger.debug('next(): subscription data')
+                logger.debug('Event triggered: subscription data')
                 self._data_event(event, _)
                 return
             if event_type == Event.SUBSCRIPTION_STATUS:
-                logger.debug('next(): subscription status')
+                logger.debug('Event triggered: subscription status')
                 self._status_event(event, _)
                 return
             if event_type == Event.TIMEOUT:
