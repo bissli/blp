@@ -26,6 +26,7 @@ class BaseEventHandler(ABC):
     def __init__(self, topics, fields):
         self.topics = topics
         self.fields = fields
+        self.parser = Parser()
 
     @abstractmethod
     def emit(self, topic, parsed):
@@ -55,7 +56,7 @@ class BaseEventHandler(ABC):
             logger.error(f'Failed to process event {event}: {exception}')
 
     def _status_event(self, event, _):
-        for message in Parser.message_iter(event):
+        for message in self.parser.message_iter(event):
             topic = message.correlationId().value()
             match message.messageType():
                 case Name.SUBSCRIPTION_FAILURE:
@@ -67,12 +68,12 @@ class BaseEventHandler(ABC):
 
     def _data_event(self, event, _):
         """Return a full mapping of fields to parsed values"""
-        for message in Parser.message_iter(event):
+        for message in self.parser.message_iter(event):
             parsed = {}
             topic = message.correlationId().value()
             for field in self.fields:
                 if field.upper() in message:
-                    val = Parser.get_subelement_value(message, field.upper())
+                    val = self.parser.get_subelement_value(message, field.upper())
                     if isinstance(val, datetime.datetime):
                         val = val.replace(tzinfo=LCL)
                     parsed[field] = val

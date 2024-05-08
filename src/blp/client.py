@@ -10,15 +10,13 @@ from collections import defaultdict
 
 import blpapi
 import pandas as pd
-import pendulum
-import pyarrow as pa
 import win32api
 import win32con
 from blp.handle import BaseEventHandler, LoggingDataFrameEventHandler
 from blp.parse import Name, Parser
 from blpapi.event import Event
 
-from date import LCL, DateTime
+from date import LCL, UTC, DateTime, Timezone
 from libb import NonBlockingDelay, is_null
 
 logger = logging.getLogger(__name__)
@@ -26,23 +24,16 @@ logger = logging.getLogger(__name__)
 __all__ = ['Blp']
 
 
-def parse_datetimerange(start, end):
-    """Only Reference Request has TZ parameter. Assume terminal is in local
-    time. Add tzinfo to dates (will be added in response as well).
+def create_daterange(beg: datetime.datetime, end: datetime.datetime):
+    """Create UTC dates for querying range requests.
     """
-    if is_null(end):
-        end = DateTime.now(LCL)
-    elif isinstance(end, datetime.datetime):
-        end = end.replace(tzinfo=LCL)
-    else:
-        end = DateTime.parse(end).replace(tzinfo=LCL)
-    if is_null(start):
-        start = end.subtract(days=1)
-    elif isinstance(start, datetime.datetime):
-        start = start.replace(tzinfo=LCL)
-    else:
-        start = DateTime.parse(start).replace(tzinfo=LCL)
-    return start, end
+    end = DateTime.now(UTC) \
+        if is_null(end) \
+        else DateTime.parse(end).in_timezone(UTC)
+    beg = end.subtract(days=1) \
+        if is_null(beg) \
+        else DateTime.parse(beg).in_timezone(UTC)
+    return beg, end
 
 
 class BaseRequest(ABC):
@@ -150,8 +141,11 @@ class HistoricalDataResponse(BaseResponse):
 
     def as_dataframe(self):
         """:return: Multi-Index DataFrame"""
-        sids, dfs = list(self.response_map.keys()), list(self.response_map.values())
-        df = pd.concat(dfs, keys=sids, axis=1)
+        data = dict(self.response_map.items())
+        if data.values():
+            df = pd.concat(data.values(), keys=data.keys(), axis=1)
+        else:
+            df = pd.DataFrame()
         return df
 
 
@@ -186,6 +180,7 @@ class HistoricalDataRequest(BaseRequest):
         fields,
         start:datetime.datetime = None,
         end:datetime.datetime = None,
+        timezone: str = LCL.name,
         period=None,
         raise_security_error=False,
         raise_field_error=False,
@@ -216,7 +211,9 @@ class HistoricalDataRequest(BaseRequest):
         self.is_single_field = is_single_field = isinstance(fields, str)
         self.sids = [sids] if is_single_sid else list(sids)
         self.fields = [fields] if is_single_field else list(fields)
-        self.start, self.end = parse_datetimerange(start, end)
+        self.start, self.end = create_daterange(start, end)
+        self.timezone = Timezone(timezone)
+        self.parser = Parser(UTC, self.timezone)
         self.period = period
         self.period_adjustment = period_adjustment
         self.currency = currency
@@ -237,8 +234,8 @@ class HistoricalDataRequest(BaseRequest):
             'clz': self.__class__.__name__,
             'symbols': ','.join(self.sids),
             'fields': ','.join(self.fields),
-            'start': self.start.strftime('%Y-%m-%d'),
-            'end': self.end.strftime('%Y-%m-%d'),
+            'start': self.start.in_timezone(self.timezone).strftime('%Y-%m-%d'),
+            'end': self.end.in_timezone(self.timezone).strftime('%Y-%m-%d'),
             'period': self.period,
         }
         # TODO: add self.overrides if defined
@@ -251,8 +248,8 @@ class HistoricalDataRequest(BaseRequest):
         request = service.createRequest('HistoricalDataRequest')
         [request.append('securities', sec) for sec in self.sids]
         [request.append('fields', fld) for fld in self.fields]
-        request.set('startDate', self.start.strftime('%Y%m%d'))
-        request.set('endDate', self.end.strftime('%Y%m%d'))
+        request.set('startDate', self.start)
+        request.set('endDate', self.end)
         request.set('periodicitySelection', self.period)
         self.period_adjustment and request.set('periodicityAdjustment', self.period_adjustment)
         self.currency and request.set('currency', self.currency)
@@ -273,12 +270,12 @@ class HistoricalDataRequest(BaseRequest):
 
     def on_security_data_element(self, element):
         """Process a securityData element - FIXME: currently not handling relateDate element"""
-        sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+        sid = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
         dmap = defaultdict(list)
         for pt in fields.values():
             for f in ['date'] + self.fields:
-                field_val = Parser.get_subelement_value(pt, f, self.force_string)
+                field_val = self.parser.get_subelement_value(pt, f, self.force_string)
                 if isinstance(field_val, datetime.datetime):
                     field_val = field_val.in_timezone(self.timezone)
                 dmap[f].append(field_val)
@@ -291,12 +288,12 @@ class HistoricalDataRequest(BaseRequest):
         self.response.on_security_complete(sid, df)
 
     def process_response(self, event, is_final):
-        for message in Parser.message_iter(event):
+        for message in self.parser.message_iter(event):
             # single security element in historical request
             element = message.getElement(Name.SECURITY_DATA)
             if Name.SECURITY_ERROR in element:
-                sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
-                self.security_errors.append(Parser.as_security_error(element.getElement(Name.SECURITY_ERROR), sid))
+                sid = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+                self.security_errors.append(self.parser.as_security_error(element.getElement(Name.SECURITY_ERROR), sid))
             else:
                 self.on_security_data_element(element)
 
@@ -348,7 +345,8 @@ class ReferenceDataRequest(BaseRequest):
         self.sids = [sids] if isinstance(sids, str) else sids
         self.fields = [fields] if isinstance(fields, str) else fields
         self.return_formatted_value = return_formatted_value
-        self.timezone = pendulum.tz.Timezone(timezone)
+        self.timezone = Timezone(timezone)
+        self.parser = Parser(UTC, self.timezone)
         self.overrides = overrides
 
     def __repr__(self):
@@ -368,26 +366,26 @@ class ReferenceDataRequest(BaseRequest):
         [request.append('securities', sec) for sec in self.sids]
         [request.append('fields', fld) for fld in self.fields]
         self.set_flag(request, self.return_formatted_value, 'returnFormattedValue')
-        self.set_flag(request, False, 'useUTCTime')
+        self.set_flag(request, True, 'useUTCTime')
         self.apply_overrides(request, self.overrides)
         return request
 
     def process_response(self, event, is_final):
-        for msg in Parser.message_iter(event):
-            for element, err in Parser.security_element_iter(msg.getElement(Name.SECURITY_DATA)):
+        for msg in self.parser.message_iter(event):
+            for element, err in self.parser.security_element_iter(msg.getElement(Name.SECURITY_DATA)):
                 if err:
                     self.security_errors.append(err)
                     continue
                 self._process_security_element(element)
 
     def _process_security_element(self, element):
-        sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+        sid = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
-        field_data = Parser.get_subelement_values(fields, self.fields, self.force_string)
+        field_data = self.parser.get_subelement_values(fields, self.fields, self.force_string)
         field_data = [x.in_timezone(self.timezone) if isinstance(x, datetime.datetime) else x for x in field_data]
         assert len(field_data) == len(self.fields), 'Field length must match data length'
         self.response.on_security_data(sid, dict(list(zip(self.fields, field_data))))
-        field_errors = Parser.get_field_errors(element)
+        field_errors = self.parser.get_field_errors(element)
         field_errors and self.field_errors.extend(field_errors)
 
 
@@ -409,12 +407,14 @@ class IntradayTickResponse(BaseResponse):
 
 class IntradayTickRequest(BaseRequest):
     """Intraday tick request. Can submit to MSG1 as well for bond runs.
+    Note: returns UTC datetime by default.
     """
     def __init__(
         self,
         sid,
         start: datetime.datetime = None,
         end: datetime.datetime = None,
+        timezone: str = LCL.name,
         events=('TRADE', 'BID', 'ASK', 'BID_BEST', 'ASK_BEST', 'MID_PRICE', 'AT_TRADE', 'BEST_BID', 'BEST_ASK'),
         include_condition_codes=None,
         include_nonplottable_events=None,
@@ -442,7 +442,9 @@ class IntradayTickRequest(BaseRequest):
         self.include_action_codes = include_action_codes
         self.include_indicator_codes = include_indicator_codes
         self.include_trade_time = include_trade_time
-        self.start, self.end = parse_datetimerange(start, end)
+        self.start, self.end = create_daterange(start, end)
+        self.timezone = Timezone(timezone)
+        self.parser = Parser(UTC, self.timezone)
 
     def __repr__(self):
         fmtargs = {'clz': self.__class__.__name__, 'sid': self.sid, 'events': ','.join(self.events)}
@@ -473,13 +475,13 @@ class IntradayTickRequest(BaseRequest):
 
     def on_tick_data(self, ticks):
         """Process the incoming tick data array"""
-        for tick in Parser.element_iter(ticks):
+        for tick in self.parser.element_iter(ticks):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
-            tickmap = {n: Parser.get_subelement_value(tick, n) for n in names}
+            tickmap = {n: self.parser.get_subelement_value(tick, n) for n in names}
             self.response.ticks.append(tickmap)
 
     def process_response(self, event, is_final):
-        for msg in Parser.message_iter(event):
+        for msg in self.parser.message_iter(event):
             tdata = msg.getElement('tickData')
             # tickData will have 0 to 1 tickData[] elements
             if 'tickData' in tdata:
@@ -507,6 +509,7 @@ class IntradayBarRequest(BaseRequest):
         sid,
         start:datetime.datetime = None,
         end:datetime.datetime = None,
+        timezone:str = LCL.name,
         event=('TRADE', 'BID', 'ASK', 'BID_BEST', 'ASK_BEST', 'BEST_BID', 'BEST_ASK'),
         interval=None,
         gap_fill_initial_bar=None,
@@ -533,15 +536,17 @@ class IntradayBarRequest(BaseRequest):
         self.adjustment_abnormal = adjustment_abnormal
         self.adjustment_split = adjustment_split
         self.adjustment_follow_DPDF = adjustment_follow_DPDF
-        self.start, self.end = parse_datetimerange(start, end)
+        self.start, self.end = create_daterange(start, end)
+        self.timezone = Timezone(timezone)
+        self.parser = Parser(UTC, self.timezone)
 
     def __repr__(self):
         fmtargs = {
             'clz': self.__class__.__name__,
             'sid': self.sid,
             'event': self.event,
-            'start': self.start,
-            'end': self.end,
+            'start': self.start.in_timezone(self.timezone),
+            'end': self.end.in_timezone(self.timezone),
         }
         return '<{clz}({sid}, {event}, start={start}, end={end})'.format(**fmtargs)
 
@@ -565,13 +570,13 @@ class IntradayBarRequest(BaseRequest):
 
     def on_bar_data(self, bars):
         """Process the incoming tick data array"""
-        for tick in Parser.element_iter(bars):
+        for tick in self.parser.element_iter(bars):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
-            barmap = {n: Parser.get_subelement_value(tick, n) for n in names}
+            barmap = {n: self.parser.get_subelement_value(tick, n) for n in names}
             self.response.bars.append(barmap)
 
     def process_response(self, event, is_final):
-        for msg in Parser.message_iter(event):
+        for msg in self.parser.message_iter(event):
             data = msg.getElement('barData')
             # tickData will have 0 to 1 tickData[] elements
             if 'barTickData' in data:
@@ -599,13 +604,23 @@ class EQSResponse(BaseResponse):
 
 class EQSRequest(BaseRequest):
 
-    def __init__(self, name, type='GLOBAL', group='General', asof=None, language=None):
+    def __init__(
+        self,
+        name,
+        type='GLOBAL',
+        group='General',
+        asof=None,
+        language=None,
+        timezone: str = LCL.name,
+    ):
         super().__init__('//blp/refdata')
         self.name = name
         self.group = group
         self.type = type
         self.asof = pd.to_datetime(asof) if asof else None
         self.language = language
+        self.timezone = Timezone(timezone)
+        self.parser = Parser(UTC, self.timezone)
 
     def __repr__(self):
         fmtargs = {
@@ -634,22 +649,22 @@ class EQSRequest(BaseRequest):
         return request
 
     def process_response(self, event, is_final):
-        for message in Parser.message_iter(event):
+        for message in self.parser.message_iter(event):
             data = message.getElement('data')
             security = data.getElement(Name.SECURITY_DATA)
-            for element, error in Parser.security_iter(security):
+            for element, error in self.parser.security_iter(security):
                 if error:
                     self.security_errors.append(error)
                     continue
                 self._process_security_element(element)
 
     def _process_security_element(self, element):
-        sid = Parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+        sid = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
         fldnames = [str(field.name()) for field in fields.elements()]
-        fdata = Parser.get_subelement_values(fields, fldnames)
+        fdata = self.parser.get_subelement_values(fields, fldnames)
         self.response.on_security_data(sid, dict(list(zip(fldnames, fdata))))
-        ferrors = Parser.get_field_errors(element)
+        ferrors = self.parser.get_field_errors(element)
         ferrors and self.field_errors.extend(ferrors)
 
 
@@ -818,6 +833,7 @@ class Blp:
         flds,
         start:datetime.datetime = None,
         end:datetime.datetime = None,
+        timezone: str = LCL.name,
         period=None,
         raise_security_error=False,
         raise_field_error=False,
@@ -845,6 +861,7 @@ class Blp:
             flds,
             start=start,
             end=end,
+            timezone=timezone,
             period=period,
             raise_security_error=raise_security_error,
             raise_field_error=raise_field_error,
@@ -856,6 +873,7 @@ class Blp:
         self,
         sids,
         flds,
+        timezone: str = LCL.name,
         raise_security_error=False,
         raise_field_error=False,
         **overrides
@@ -877,6 +895,7 @@ class Blp:
         req = ReferenceDataRequest(
             sids,
             flds,
+            timezone=timezone,
             raise_security_error=raise_security_error,
             raise_field_error=raise_field_error,
             **overrides,
@@ -889,6 +908,7 @@ class Blp:
         events=None,
         start:datetime.datetime = None,
         end:datetime.datetime = None,
+        timezone: str = LCL.name,
         include_condition_codes=None,
         include_nonplottable_events=None,
         include_exchange_codes=None,
@@ -908,6 +928,7 @@ class Blp:
             sid,
             start=start,
             end=end,
+            timezone=timezone,
             events=events,
             include_condition_codes=include_condition_codes,
             include_nonplottable_events=include_nonplottable_events,
@@ -930,6 +951,7 @@ class Blp:
         event='TRADE',
         start:datetime.datetime = None,
         end:datetime.datetime = None,
+        timezone: str = LCL.name,
         interval=None,
         gap_fill_initial_bar=None,
         return_eids=None,
@@ -942,6 +964,7 @@ class Blp:
             sid,
             start=start,
             end=end,
+            timezone=timezone,
             event=event,
             interval=interval,
             gap_fill_initial_bar=gap_fill_initial_bar,
@@ -953,8 +976,23 @@ class Blp:
         )
         return self.execute(req)
 
-    def get_screener(self, name, group='General', type='GLOBAL', asof=None, language=None):
-        req = EQSRequest(name, type=type, group=group, asof=asof, language=language)
+    def get_screener(
+        self,
+        name,
+        group='General',
+        type='GLOBAL',
+        asof=None,
+        language=None,
+        timezone: str = LCL.name,
+    ):
+        req = EQSRequest(
+            name,
+            type=type,
+            group=group,
+            asof=asof,
+            language=language,
+            timezone=timezone,
+        )
         return self.execute(req)
 
     def subscribe(
@@ -971,8 +1009,15 @@ class Blp:
         handler_options={},  # noqa
     ):
         """Create subscription request"""
-        sub = Subscription(topics=topics, fields=fields, interval=interval,
-                           host=host, port=port, auth=auth, dispatcher=dispatcher)
+        sub = Subscription(
+            topics=topics,
+            fields=fields,
+            interval=interval,
+            host=host,
+            port=port,
+            auth=auth,
+            dispatcher=dispatcher,
+        )
         sub.subscribe(runtime=runtime, handler=handler, **handler_options)
 
 
@@ -1028,6 +1073,8 @@ class Subscription:
         \\-----------/\\------/\\-----------/\\------------------------/
         |          |         |                  |
         Service    Prefix   Instrument           Suffix
+
+        All subscription date/times results are in the default timezone of the terminal.
 
         """
         _handler = handler(self.topics, self.fields, **kwargs)
