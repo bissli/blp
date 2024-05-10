@@ -5,6 +5,7 @@ import logging
 import time
 import warnings
 from abc import ABC, abstractmethod
+from typing import Any
 
 import blpapi
 import numpy as np
@@ -23,39 +24,40 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 class BaseEventHandler(ABC):
     """Base Event Handler."""
 
-    def __init__(self, topics, fields):
+    def __init__(self, topics: list[str], fields: list[str]):
         self.topics = topics
         self.fields = fields
         self.parser = Parser()
 
     @abstractmethod
-    def emit(self, topic, parsed):
-        """Parsed will be provided by the BaseEventHandler.
+    def emit(self, topic: str, row: dict[str: Any]):
+        """Triggerd by BaseEventHandler on data event.
 
-        Consists of a tuple: (topic, dictionary of type {field: parsed_value} )
+        Topic: topic from topics
+        Row: {field: field value}
+
+        Implement any handling logic here.
         """
 
-    def __call__(self, event, _):
+    def __call__(self, event, *args):
         """This method is called from Bloomberg session in a separate thread
         for each incoming event.
         """
         try:
-            event_type = event.eventType()
-            if event_type == Event.SUBSCRIPTION_DATA:
-                logger.debug('Event triggered: subscription data')
-                self._data_event(event, _)
-                return
-            if event_type == Event.SUBSCRIPTION_STATUS:
-                logger.debug('Event triggered: subscription status')
-                self._status_event(event, _)
-                return
-            if event_type == Event.TIMEOUT:
-                return
-            self._misc_event(event, _)
+            match event.eventType():
+                case Event.SUBSCRIPTION_DATA:
+                    self._on_data_event(event)
+                case Event.SUBSCRIPTION_STATUS:
+                    self._on_status_event(event)
+                case Event.TIMEOUT:
+                    return
+                case _:
+                    self._on_other_event(event)
         except blpapi.Exception as exception:
             logger.error(f'Failed to process event {event}: {exception}')
 
-    def _status_event(self, event, _):
+    def _on_status_event(self, event):
+        logger.debug('Event triggered: subscription status')
         for message in self.parser.message_iter(event):
             topic = message.correlationId().value()
             match message.messageType():
@@ -66,20 +68,22 @@ class BaseEventHandler(ABC):
                     # Subscription can be terminated if the session identity is revoked.
                     logger.error(f'Subscription for {topic} TERMINATED')
 
-    def _data_event(self, event, _):
+    def _on_data_event(self, event):
         """Return a full mapping of fields to parsed values"""
+        logger.debug('Event triggered: subscription data')
         for message in self.parser.message_iter(event):
-            parsed = {}
+            row = {}
             topic = message.correlationId().value()
             for field in self.fields:
                 if field.upper() in message:
                     val = self.parser.get_subelement_value(message, field.upper())
                     if isinstance(val, datetime.datetime):
                         val = val.replace(tzinfo=LCL)
-                    parsed[field] = val
-            self.emit(topic, parsed)
+                    row[field] = val
+            self.emit(topic, row)
 
-    def _misc_event(self, event, _):
+    def _on_other_event(self, event):
+        logger.debug('Event triggered: other')
         for message in event:
             match message.messageType():
                 case Name.SLOW_CONSUMER_WARNING:
@@ -115,7 +119,7 @@ class BaseEventHandler(ABC):
                     logger.error('Session terminated')
 
 
-class SimpleEventHandler(BaseEventHandler):
+class SimpleLoggingEventHandler(BaseEventHandler):
     """Simple event handler."""
 
     def emit(self, topic, parsed):
