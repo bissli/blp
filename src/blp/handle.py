@@ -10,10 +10,10 @@ from typing import Any
 import blpapi
 import numpy as np
 import pandas as pd
-from blp.parse import Name, Parser
 from blpapi.event import Event
 from natsort import index_natsorted
 
+from blp.parse import Name, Parser
 from date import LCL
 
 logger = logging.getLogger(__name__)
@@ -122,26 +122,38 @@ class BaseEventHandler(ABC):
 class SimpleLoggingEventHandler(BaseEventHandler):
     """Simple event handler."""
 
-    def emit(self, topic, parsed):
-        logger.info(f'{topic}: {parsed}')
+    def emit(self, topic, row):
+        logger.info(f'{topic}: {row}')
 
 
 class BaseDataFrameEventHandler(BaseEventHandler):
-    """Store as DataFrame"""
+    """Store as DataFrame
 
-    def __init__(self, topics: list, fields: list, /, index: list = None):
+    DataFrame index are the topics. Can be updated with custom index
+
+    """
+
+    def __init__(
+        self,
+        topics: list[str],
+        fields: list[str],
+        /,
+        index: list = None,  # list of columns representing the index
+    ):
         super().__init__(topics, fields)
-        self.index = index
         nrows, ncols = len(self.topics), len(self.fields)
         vals = np.repeat(np.nan, nrows * ncols).reshape((nrows, ncols))
-        self.frame = pd.DataFrame(vals, columns=self.fields)
+        self.frame = pd.DataFrame(vals, columns=self.fields, index=self.topics)
+        self.index = index
+        if self.index:
+            self.frame.index = self.index
 
-    def emit(self, topic, parsed):
+    def emit(self, topic, row):
         logger.debug(f'Received event for {time.strftime("%Y/%m/%d %X")}: {topic}')
-        ridx = self.topics.index(topic)
+        ridx = self.frame.index.get_loc(topic)
         for cidx, field in enumerate(self.fields):
-            if field in parsed:
-                self.frame.iloc[ridx, cidx] = parsed[field]
+            if field in row:
+                self.frame.iloc[ridx, cidx] = row[field]
 
 
 class LoggingDataFrameEventHandler(BaseDataFrameEventHandler):
@@ -168,6 +180,6 @@ class LoggingDataFrameEventHandler(BaseDataFrameEventHandler):
             df = df.sort_values(by=col, key=sort_key)
         return df
 
-    def emit(self, topic, parsed):
-        super().emit(topic, parsed)
+    def emit(self, topic, row):
+        super().emit(topic, row)
         logger.info(self.sorted().to_string())

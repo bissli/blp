@@ -12,10 +12,10 @@ import blpapi
 import pandas as pd
 import win32api
 import win32con
-from blp.handle import BaseEventHandler, LoggingDataFrameEventHandler
-from blp.parse import Name, Parser
 from blpapi.event import Event
 
+from blp.handle import BaseEventHandler, LoggingDataFrameEventHandler
+from blp.parse import Name, Parser
 from date import LCL, UTC, DateTime, Timezone
 from libb import NonBlockingDelay, is_null
 
@@ -1006,7 +1006,7 @@ class Blp:
         dispatcher=None,
         runtime=24*60*60,
         handler=LoggingDataFrameEventHandler,
-        handler_options={},  # noqa
+        **kwargs
     ):
         """Create subscription request"""
         sub = Subscription(
@@ -1018,7 +1018,7 @@ class Blp:
             auth=auth,
             dispatcher=dispatcher,
         )
-        sub.subscribe(runtime=runtime, handler=handler, **handler_options)
+        sub.subscribe(runtime=runtime, handler=handler, **kwargs)
 
 
 class Subscription:
