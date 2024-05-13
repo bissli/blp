@@ -1,8 +1,8 @@
-"""Subscription event handlers
+"""Subscription event handlers. Baseline backend model for all handlers here
+is pandas.DataFrame.
 """
 import datetime
 import logging
-import time
 import warnings
 from abc import ABC, abstractmethod
 from typing import Any
@@ -15,6 +15,7 @@ from natsort import index_natsorted
 
 from blp.parse import Name, Parser
 from date import LCL
+from libb import debounce
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ class BaseEventHandler(ABC):
                     desc = message.getElement('reason').getElementAsString('description')
                     raise Exception(f'Subscription failed topic={topic} desc={desc}')
                 case Name.SUBSCRIPTION_TERMINATED:
-                    # Subscription can be terminated if the session identity is revoked.
+                    # subscription can be terminated if the session identity is revoked.
                     logger.error(f'Subscription for {topic} TERMINATED')
 
     def _on_data_event(self, event):
@@ -83,7 +84,7 @@ class BaseEventHandler(ABC):
             self.emit(topic, row)
 
     def _on_other_event(self, event):
-        logger.debug('Event triggered: other')
+        logger.debug('Event triggered: internal warning event')
         for message in event:
             match message.messageType():
                 case Name.SLOW_CONSUMER_WARNING:
@@ -119,17 +120,43 @@ class BaseEventHandler(ABC):
                     logger.error('Session terminated')
 
 
-class SimpleLoggingEventHandler(BaseEventHandler):
-    """Simple event handler."""
+class LoggingEventHandler(BaseEventHandler):
+    """Log to debug the emit message"""
 
     def emit(self, topic, row):
-        logger.info(f'{topic}: {row}')
+        super().emit(topic, row)
+        logger.debug(f'Event: {topic}: {row}')
 
 
-class BaseDataFrameEventHandler(BaseEventHandler):
-    """Store as DataFrame
+def ordering_datetime_modifier(x):
+    """Place anything not parsed at the beginning
+    Replace sort_mod perhaps with this if type is datetime
+    """
+    parsed = DateTime.parse(x)
+    if not isinstance(parsed, DateTime):
+        parsed = DateTime.now().start_of('day')
+    return pd.to_datetime(parsed)
 
-    DataFrame index are the topics. Can be updated with custom index
+
+@debounce(1)
+def sort(df, by):
+    """Sorts dataframe inplace. Debounce N seconds."""
+    if isinstance(df.dtypes[by], pd.Timestamp):
+        sort_mod = ordering_datetime_modifier
+    else:
+        sort_mod = lambda x: x
+
+    sortable = [sort_mod(x) for x in df[by]]
+    sort_key = lambda x: np.argsort(index_natsorted(sortable))
+    df.sort_values(by=by, key=sort_key, inplace=True)  # noqa
+
+
+class DefaultEventHandler(LoggingEventHandler):
+    """Creates DataFrame and update as events are registered.
+
+    Topics: list[str]: subscribable topics, i.e. IBM US Equity
+    Fields: list[str]: fields to query
+    Index:  list[str]: list of column names representing the DataFrame index.
 
     """
 
@@ -138,48 +165,32 @@ class BaseDataFrameEventHandler(BaseEventHandler):
         topics: list[str],
         fields: list[str],
         /,
-        index: list = None,  # list of columns representing the index
+        index: list[str] = None,
+        time_field: str = None,
     ):
         super().__init__(topics, fields)
+
         nrows, ncols = len(self.topics), len(self.fields)
         vals = np.repeat(np.nan, nrows * ncols).reshape((nrows, ncols))
         self.frame = pd.DataFrame(vals, columns=self.fields, index=self.topics)
+
         self.index = index
         if self.index:
             self.frame.index = self.index
 
+        if time_field is None:
+            this = [field for field in self.fields if 'TIME' in field]
+            if not this:
+                raise ValueError('A time-like for sorting not found in fields')
+            time_field = this[0]
+        self.time_field = time_field
+
     def emit(self, topic, row):
-        logger.debug(f'Received event for {time.strftime("%Y/%m/%d %X")}: {topic}')
+        super().emit(topic, row)
+
         ridx = self.frame.index.get_loc(topic)
         for cidx, field in enumerate(self.fields):
             if field in row:
                 self.frame.iloc[ridx, cidx] = row[field]
 
-
-class LoggingDataFrameEventHandler(BaseDataFrameEventHandler):
-    """Basic dataset logging event handler"""
-
-    def ordering_datetime_modifier(self, x):
-        """Place anything not parsed at the beginning
-        Replace sort_mod perhaps with this if type is datetime
-        """
-        parsed = DateTime.parse(x)
-        if not isinstance(parsed, DateTime):
-            parsed = DateTime.now().start_of('day')
-        return parsed
-
-    def sorted(self):
-        df = self.frame.copy(deep=True)
-        for col in (self.index or []):
-            if isinstance(df.dtypes[col], pd.Timestamp):
-                sort_mod = self.ordering_datetime_modifier
-            else:
-                sort_mod = lambda x: x
-            sortable = [sort_mod(x) for x in df[col]]
-            sort_key = lambda x: np.argsort(index_natsorted(sortable))
-            df = df.sort_values(by=col, key=sort_key)
-        return df
-
-    def emit(self, topic, row):
-        super().emit(topic, row)
-        logger.info(self.sorted().to_string())
+        sort(self.frame, self.time_field)
