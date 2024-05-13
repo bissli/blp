@@ -1090,8 +1090,9 @@ class Subscription:
         delay = NonBlockingDelay()
         delay.delay(runtime)
 
-        while not delay.timeout():
-            continue
-
-        logger.warning('Subscription runtime expired. Unsubscribing...')
-        session.unsubscribe(subscriptions)
+        try:
+            while not delay.timeout():
+                continue
+        finally:
+            logger.warning('Subscription runtime expired. Unsubscribing...')
+            session.unsubscribe(subscriptions)
