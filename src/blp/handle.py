@@ -28,7 +28,7 @@ class BaseEventHandler(ABC):
     def __init__(self, topics: list[str], fields: list[str]):
         self.topics = topics
         self.fields = fields
-        self.parser = Parser()
+        self.parser = Parser(assumed_timezone=LCL, desired_timezone=LCL)
 
     @abstractmethod
     def emit(self, topic: str, row: dict[str: Any]):
