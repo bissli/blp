@@ -173,6 +173,7 @@ class DefaultEventHandler(LoggingEventHandler):
         nrows, ncols = len(self.topics), len(self.fields)
         vals = np.repeat(np.nan, nrows * ncols).reshape((nrows, ncols))
         self.frame = pd.DataFrame(vals, columns=self.fields, index=self.topics)
+        self.frame = self.frame.astype(object).where(pd.notnull(self.frame), None)
 
         self.index = index
         if self.index:
