@@ -1085,14 +1085,13 @@ class Subscription:
         options = {'interval': f'{self.interval:.1f}'} if self.interval else {}
         for topic in self.topics:
             subscriptions.add(topic, self.fields, options, blpapi.CorrelationId(topic))
-        session.subscribe(subscriptions)
-
-        delay = NonBlockingDelay()
-        delay.delay(runtime)
-
         try:
+            logger.info('Starting subscription...')
+            session.subscribe(subscriptions)
+            delay = NonBlockingDelay()
+            delay.delay(runtime)
             while not delay.timeout():
                 continue
         finally:
-            logger.warning('Subscription runtime expired. Unsubscribing...')
+            logger.info('Ending subscription...')
             session.unsubscribe(subscriptions)
