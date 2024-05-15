@@ -108,9 +108,13 @@ class Parser:
                     return self._sequence_as_dataframe(element)
             return self._sequence_as_json(element)
         if force_string:
+            if element.isNull():
+                return ''
             return round_digit_string(element.getValueAsString())
         if dtype in NUMERIC_TYPES:
-            return element.getValue() or np.nan
+            if element.isNull():
+                return np.nan
+            return element.getValue()
         if dtype == DataType.DATE:
             if element.isNull():
                 return pd.NaT
@@ -133,6 +137,8 @@ class Parser:
                     .in_timezone(self.desired_timezone)
         if dtype == DataType.CHOICE:
             logger.warning('CHOICE data type needs implemented')
+        if element.isNull():
+            return ''
         return round_digit_string(element.getValueAsString())
 
     #
