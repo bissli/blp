@@ -10,14 +10,18 @@ from collections import defaultdict
 
 import blpapi
 import pandas as pd
-import win32api
-import win32con
 from blpapi.event import Event
 
 from blp.handle import BaseEventHandler, DefaultEventHandler
 from blp.parse import Name, Parser
 from date import LCL, UTC, DateTime, Timezone
 from libb import NonBlockingDelay, is_null
+
+try:
+    import win32api
+    import win32con
+except ModuleNotFoundError:
+    pass
 
 logger = logging.getLogger(__name__)
 
