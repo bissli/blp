@@ -335,6 +335,7 @@ class ReferenceDataRequest(BaseRequest):
         return_formatted_value=None,
         timezone: str = LCL.name,
         force_string=False,
+        time_as_datetime=False,
         **overrides,
     ):
         """response_type: (df, map) how to return the results"""
@@ -350,7 +351,11 @@ class ReferenceDataRequest(BaseRequest):
         self.fields = [fields] if isinstance(fields, str) else fields
         self.return_formatted_value = return_formatted_value
         self.timezone = Timezone(timezone)
-        self.parser = Parser(UTC, self.timezone)
+        self.parser = Parser(
+            assumed_timezone=UTC,
+            desired_timezone=self.timezone,
+            time_as_datetime=time_as_datetime,
+        )
         self.overrides = overrides
 
     def __repr__(self):
@@ -688,6 +693,7 @@ class Session(blpapi.Session):
         with contextlib.suppress(Exception):
             self.stop()
             self.destroy()
+            logger.debug('Closed active Bloomberg session')
 
 
 def create_session(

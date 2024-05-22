@@ -51,10 +51,12 @@ class Parser:
     def __init__(
         self,
         assumed_timezone: Timezone = UTC,
-        desired_timezone: Timezone = LCL
+        desired_timezone: Timezone = LCL,
+        time_as_datetime: bool = False
     ):
         self.assumed_timezone = assumed_timezone or UTC
         self.desired_timezone = desired_timezone or LCL
+        self.time_as_datetime = time_as_datetime
 
     #
     # iterator wrappers to handle errors in elements
@@ -128,11 +130,16 @@ class Parser:
                 # parsing datetime.time with no tzinfo
                 _date = Date.today()
                 _time = Time.parse(obj).replace(tzinfo=self.assumed_timezone)
-                return DateTime.combine(_date, _time, self.assumed_timezone)\
-                    .in_timezone(self.desired_timezone).time()
+                _datetime = DateTime\
+                    .combine(_date, _time, self.assumed_timezone)\
+                    .in_timezone(self.desired_timezone)
+                if self.time_as_datetime:
+                    return _datetime
+                return _datetime.time()
             if isinstance(obj, datetime.datetime):
                 # parsing datetime.datetime with no tzinfo
-                return DateTime.parse(obj)\
+                return DateTime\
+                    .parse(obj)\
                     .replace(tzinfo=self.assumed_timezone)\
                     .in_timezone(self.desired_timezone)
         if dtype == DataType.CHOICE:

@@ -25,10 +25,19 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 class BaseEventHandler(ABC):
     """Base Event Handler."""
 
-    def __init__(self, topics: list[str], fields: list[str]):
+    def __init__(self, topics: list[str], fields: list[str], **kwargs):
         self.topics = topics
         self.fields = fields
-        self.parser = Parser(assumed_timezone=LCL, desired_timezone=LCL)
+
+        assumed_timezone = kwargs.pop('assumed_timezone', LCL)
+        desired_timezone = kwargs.pop('desired_timezone', LCL)
+        time_as_datetime = kwargs.pop('time_as_datetime', False)
+
+        self.parser = Parser(
+            assumed_timezone=assumed_timezone,
+            desired_timezone=desired_timezone,
+            time_as_datetime=time_as_datetime,
+        )
 
     @abstractmethod
     def emit(self, topic: str, row: dict[str: Any]):
@@ -123,8 +132,8 @@ class BaseEventHandler(ABC):
 class LoggingEventHandler(BaseEventHandler):
     """Log to debug the emit message"""
 
-    def emit(self, topic, row):
-        super().emit(topic, row)
+    def emit(self, topic, row, **kwargs):
+        super().emit(topic, row, **kwargs)
         logger.debug(f'Event: {topic}: {row}')
 
 
@@ -167,8 +176,9 @@ class DefaultEventHandler(LoggingEventHandler):
         /,
         index: list[str] = None,
         time_field: str = None,
+        **kwargs
     ):
-        super().__init__(topics, fields)
+        super().__init__(topics, fields, **kwargs)
 
         nrows, ncols = len(self.topics), len(self.fields)
         vals = np.repeat(np.nan, nrows * ncols).reshape((nrows, ncols))
