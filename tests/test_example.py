@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
-from blp import Blp
 
+from blp import Blp
 from date import Date
 
 

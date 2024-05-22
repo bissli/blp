@@ -1,7 +1,6 @@
 """Subscription event handlers. Baseline backend model for all handlers here
 is pandas.DataFrame.
 """
-import datetime
 import logging
 import warnings
 from abc import ABC, abstractmethod
@@ -14,7 +13,7 @@ from blpapi.event import Event
 from natsort import index_natsorted
 
 from blp.parse import Name, Parser
-from date import LCL
+from date import LCL, DateTime
 from libb import debounce
 
 logger = logging.getLogger(__name__)
@@ -87,8 +86,6 @@ class BaseEventHandler(ABC):
             for field in self.fields:
                 if field.upper() in message:
                     val = self.parser.get_subelement_value(message, field.upper())
-                    if isinstance(val, datetime.datetime):
-                        val = val.replace(tzinfo=LCL)
                     row[field] = val
             self.emit(topic, row)
 
