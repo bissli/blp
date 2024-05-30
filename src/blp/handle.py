@@ -1,6 +1,7 @@
 """Subscription event handlers. Baseline backend model for all handlers here
 is pandas.DataFrame.
 """
+import datetime
 import logging
 import warnings
 from abc import ABC, abstractmethod
@@ -147,10 +148,13 @@ def ordering_datetime_modifier(x):
 @debounce(1)
 def sort(df, by):
     """Sorts dataframe inplace. Debounce N seconds."""
+    sort_mod = lambda x: x
     if isinstance(df.dtypes[by], pd.Timestamp):
         sort_mod = ordering_datetime_modifier
-    else:
-        sort_mod = lambda x: x
+    if len(df) > 1:
+        samples = df.get(by).tolist()
+        if any(isinstance(x, pd.Timestamp | datetime.date) for x in samples):
+            sort_mod = ordering_datetime_modifier
 
     sortable = [sort_mod(x) for x in df[by]]
     sort_key = lambda x: np.argsort(index_natsorted(sortable))
