@@ -436,6 +436,17 @@ class IntradayTickRequest(BaseRequest):
         include_rsp_codes=None,
         include_trade_time=None,
         include_bic_mic_codes=None,
+        include_spread_price=None,
+        include_yield=None,
+        adjustment_normal=None,
+        adjustment_abnormal=None,
+        adjustment_split=None,
+        adjustment_follow_DPDF=None,
+        include_client_specific_fields=None,
+        include_trade_id=None,
+        include_upfront_price=None,
+        include_trade_date=None,
+        include_bloomberg_standard_condition_codes=None,
     ):
         super().__init__('//blp/refdata')
         self.sid = sid
@@ -451,6 +462,17 @@ class IntradayTickRequest(BaseRequest):
         self.include_action_codes = include_action_codes
         self.include_indicator_codes = include_indicator_codes
         self.include_trade_time = include_trade_time
+        self.include_spread_price = include_spread_price
+        self.include_yield = include_yield
+        self.adjustment_normal = adjustment_normal
+        self.adjustment_abnormal = adjustment_abnormal
+        self.adjustment_split = adjustment_split
+        self.adjustment_follow_DPDF = adjustment_follow_DPDF
+        self.include_client_specific_fields = include_client_specific_fields
+        self.include_trade_id = include_trade_id
+        self.include_upfront_price = include_upfront_price
+        self.include_trade_date = include_trade_date
+        self.include_bloomberg_standard_condition_codes = include_bloomberg_standard_condition_codes
         self.start, self.end = create_daterange(start, end)
         self.timezone = Timezone(timezone)
         self.parser = Parser(UTC, self.timezone)
@@ -473,13 +495,23 @@ class IntradayTickRequest(BaseRequest):
         self.set_flag(request, self.include_exchange_codes, 'includeExchangeCodes')
         self.set_flag(request, self.return_eids, 'returnEids')
         self.set_flag(request, self.include_broker_codes, 'includeBrokerCodes')
+        self.set_flag(request, self.include_spread_price, 'includeSpreadPrice')
+        self.set_flag(request, self.include_yield, 'includeYield')
+        self.set_flag(request, self.adjustment_normal, 'adjustmentNormal')
+        self.set_flag(request, self.adjustment_abnormal, 'adjustmentAbnormal')
+        self.set_flag(request, self.adjustment_split, 'adjustmentSplit')
+        self.set_flag(request, self.adjustment_follow_DPDF, 'adjustmentFollowDPDF')
+        self.set_flag(request, self.include_client_specific_fields, 'includeClientSpecificFields')
         self.set_flag(request, self.include_equity_ref_price, 'includeEqRefPrice')
+        self.set_flag(request, self.include_trade_id, 'includeTradeId')
         self.set_flag(request, self.include_rsp_codes, 'includeRpsCodes')
         self.set_flag(request, self.include_bic_mic_codes, 'includeBicMicCodes')
+        self.set_flag(request, self.include_upfront_price, 'includeUpfrontPrice')
         self.set_flag(request, self.include_action_codes, 'includeActionCodes')
         self.set_flag(request, self.include_indicator_codes, 'includeIndicatorCodes')
+        self.set_flag(request, self.include_trade_date, 'includeTradeDate')
         self.set_flag(request, self.include_trade_time, 'includeTradeTime')
-
+        self.set_flag(request, self.include_bloomberg_standard_condition_codes, 'includeBloombergStandardConditionCodes')
         return request
 
     def on_tick_data(self, ticks):
@@ -927,9 +959,20 @@ class Blp:
         include_equity_ref_price=None,
         include_action_codes=None,
         include_indicator_codes=None,
+        include_trade_date=None,
         include_trade_time=None,
         include_rsp_codes=None,
         include_bic_mic_codes=None,
+        include_spread_price=None,
+        include_yield=None,
+        adjustment_normal=None,
+        adjustment_abnormal=None,
+        adjustment_split=None,
+        adjustment_follow_DPDF=None,
+        include_client_specific_fields=None,
+        include_bloomberg_standard_condition_codes=None,
+        include_trade_id=None,
+        include_upfront_price=None,
         **overrides,
     ):
         if events is None:
@@ -951,6 +994,17 @@ class Blp:
             include_trade_time=include_trade_time,
             include_rsp_codes=include_rsp_codes,
             include_bic_mic_codes=include_bic_mic_codes,
+            include_spread_price=include_spread_price,
+            include_yield=include_yield,
+            adjustment_normal=adjustment_normal,
+            adjustment_abnormal=adjustment_abnormal,
+            adjustment_split=adjustment_split,
+            adjustment_follow_DPDF=adjustment_follow_DPDF,
+            include_client_specific_fields=include_client_specific_fields,
+            include_trade_id=include_trade_id,
+            include_upfront_price=include_upfront_price,
+            include_trade_date=include_trade_date,
+            include_bloomberg_standard_condition_codes=include_bloomberg_standard_condition_codes,
             **overrides,
         )
         return self.execute(req)
