@@ -25,7 +25,13 @@ except ModuleNotFoundError:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['Blp']
+__all__ = [
+    'Blp',
+    'SessionError',
+    'SessionCreateError',
+    'SessionStartError',
+    'SessionTerminatedError',
+]
 
 
 def create_daterange(beg: datetime.datetime, end: datetime.datetime):
@@ -38,6 +44,22 @@ def create_daterange(beg: datetime.datetime, end: datetime.datetime):
         if is_null(beg) \
         else DateTime.parse(beg).in_timezone(UTC)
     return beg, end
+
+
+class SessionError(RuntimeError):
+    pass
+
+
+class SessionCreateError(SessionError):
+    """Handle create session failed event"""
+
+
+class SessionStartError(SessionError):
+    """Handle start session failed event"""
+
+
+class SessionTerminatedError(SessionError):
+    """Handle start terminated failed event"""
 
 
 class BaseRequest(ABC):
@@ -97,7 +119,7 @@ class BaseRequest(ABC):
                 logger.info('Opened Bbg service ...')
             elif message.messageType() == 'SessionTerminated':
                 logger.info('Session DONE')
-                raise RuntimeError('Session DONE')
+                raise SessionTerminatedError('Session DONE')
 
     @staticmethod
     def apply_overrides(request, overrides):
@@ -719,7 +741,7 @@ class Session(blpapi.Session):
     def open_service(self, service_name):
         """Open service. Raise Exception if fails."""
         if not self.openService(service_name):
-            raise RuntimeError(f'Failed to open service {service_name}.')
+            raise SessionStartError(f'Failed to open service {service_name}.')
 
     def cleanup(self):
         with contextlib.suppress(Exception):
@@ -796,7 +818,7 @@ class SessionFactory:
         logger.info('Connecting to Bloomberg BBComm session...')
         session = create_session(host, port, auth, event_handler, event_dispatcher)
         if not session.start():
-            raise RuntimeError('Failed to start session.')
+            raise SessionCreateError('Failed to start session.')
         envuser = win32api.GetUserNameEx(win32con.NameSamCompatible)
         logger.info(f'Connected to Bloomberg BBComm as {envuser}')
         return session
