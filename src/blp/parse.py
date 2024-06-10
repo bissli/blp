@@ -52,11 +52,13 @@ class Parser:
         self,
         assumed_timezone: Timezone = UTC,
         desired_timezone: Timezone = LCL,
+        decimal_places: int = None,
         time_as_datetime: bool = False
     ):
         self.assumed_timezone = assumed_timezone or UTC
         self.desired_timezone = desired_timezone or LCL
         self.time_as_datetime = time_as_datetime
+        self.decimal_places = decimal_places
 
     #
     # iterator wrappers to handle errors in elements
@@ -112,7 +114,7 @@ class Parser:
         if force_string:
             if element.isNull():
                 return ''
-            return round_digit_string(element.getValueAsString())
+            return round_digit_string(element.getValueAsString(), self.decimal_places)
         if dtype in NUMERIC_TYPES:
             if element.isNull():
                 return np.nan
@@ -146,7 +148,7 @@ class Parser:
             logger.warning('CHOICE data type needs implemented')
         if element.isNull():
             return ''
-        return round_digit_string(element.getValueAsString())
+        return round_digit_string(element.getValueAsString(), self.decimal_places)
 
     #
     # error getters
@@ -214,6 +216,7 @@ class Parser:
         data = []
         for element in elements.values():
             for subelement in element.elements():
-                d = {str(subelement.name()): round_digit_string(subelement.getValueAsString())}
+                d = {str(subelement.name()):
+                     round_digit_string(subelement.getValueAsString(), self.decimal_places)}
                 data += [d]
         return json.dumps(data) if data else ''
