@@ -34,7 +34,7 @@ test = [
 
 [[tool.poetry.source]]
 name = "blpapi"
-url = "https://bcms.bloomberg.com/pip/simple"
+url = "https://blpapi.bloomberg.com/repository/releases/python/simple"
 priority = "explicit"
 
 [build-system]
