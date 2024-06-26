@@ -1,7 +1,6 @@
 """Subscription event handlers. Baseline backend model for all handlers here
 is pandas.DataFrame.
 """
-import datetime
 import logging
 import warnings
 from abc import ABC, abstractmethod
@@ -11,11 +10,9 @@ import blpapi
 import numpy as np
 import pandas as pd
 from blpapi.event import Event
-from natsort import index_natsorted
 
 from blp.parse import Name, Parser
-from date import LCL, DateTime
-from libb import debounce
+from date import LCL
 
 logger = logging.getLogger(__name__)
 
@@ -135,32 +132,6 @@ class LoggingEventHandler(BaseEventHandler):
         logger.debug(f'Event: {topic}: {row}')
 
 
-def ordering_datetime_modifier(x):
-    """Place anything not parsed at the beginning
-    Replace sort_mod perhaps with this if type is datetime
-    """
-    parsed = DateTime.parse(x)
-    if not isinstance(parsed, DateTime):
-        parsed = DateTime.now().start_of('day')
-    return pd.to_datetime(parsed)
-
-
-@debounce(1)
-def sort(df, by):
-    """Sorts dataframe inplace. Debounce N seconds."""
-    sort_mod = lambda x: x
-    if isinstance(df.dtypes[by], pd.Timestamp):
-        sort_mod = ordering_datetime_modifier
-    if len(df) > 1:
-        samples = df.get(by).tolist()
-        if any(isinstance(x, pd.Timestamp | datetime.date) for x in samples):
-            sort_mod = ordering_datetime_modifier
-
-    sortable = [sort_mod(x) for x in df[by]]
-    sort_key = lambda x: np.argsort(index_natsorted(sortable))
-    df.sort_values(by=by, key=sort_key, inplace=True)  # noqa
-
-
 class DefaultEventHandler(LoggingEventHandler):
     """Creates DataFrame and update as events are registered.
 
@@ -176,7 +147,6 @@ class DefaultEventHandler(LoggingEventHandler):
         fields: list[str],
         /,
         index: list[str] = None,
-        time_field: str = None,
         **kwargs
     ):
         super().__init__(topics, fields, **kwargs)
@@ -190,13 +160,6 @@ class DefaultEventHandler(LoggingEventHandler):
         if self.index:
             self.frame.index = self.index
 
-        if time_field is None:
-            this = [field for field in self.fields if 'TIME' in field]
-            if not this:
-                raise ValueError('A time-like for sorting not found in fields')
-            time_field = this[0]
-        self.time_field = time_field
-
     def emit(self, topic, row):
         super().emit(topic, row)
 
@@ -204,5 +167,3 @@ class DefaultEventHandler(LoggingEventHandler):
         for cidx, field in enumerate(self.fields):
             if field in row:
                 self.frame.iloc[ridx, cidx] = row[field]
-
-        sort(self.frame, self.time_field)
