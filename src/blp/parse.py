@@ -123,7 +123,7 @@ class Parser:
             if element.isNull():
                 return pd.NaT
             # parsing a datetime.date object
-            return Date.parse(element.getValue())
+            return Date.instance(element.getValue())
         if dtype in {DataType.DATETIME, DataType.TIME}:
             if element.isNull():
                 return pd.NaT
@@ -131,7 +131,7 @@ class Parser:
             if isinstance(obj, datetime.time):
                 # parsing datetime.time with no tzinfo
                 _date = Date.today()
-                _time = Time.parse(obj).replace(tzinfo=self.assumed_timezone)
+                _time = Time.instance(obj).replace(tzinfo=self.assumed_timezone)
                 _datetime = DateTime\
                     .combine(_date, _time, self.assumed_timezone)\
                     .in_timezone(self.desired_timezone)
@@ -141,7 +141,7 @@ class Parser:
             if isinstance(obj, datetime.datetime):
                 # parsing datetime.datetime with no tzinfo
                 return DateTime\
-                    .parse(obj)\
+                    .instance(obj)\
                     .replace(tzinfo=self.assumed_timezone)\
                     .in_timezone(self.desired_timezone)
         if dtype == DataType.CHOICE:

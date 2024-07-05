@@ -34,15 +34,36 @@ __all__ = [
 ]
 
 
-def create_daterange(beg: datetime.datetime, end: datetime.datetime):
+def create_daterange(beg: datetime.datetime, end: datetime.datetime) -> tuple[DateTime]:
     """Create UTC dates for querying range requests.
+
+    >>> import datetime
+    >>> beg, end = datetime.datetime(2024, 1, 1), datetime.datetime(2024, 1, 2)
+    >>> create_daterange(beg, end)
+    (DateTime(2024, 1, 1, 5, 0, 0, tzinfo=Timezone('UTC')), DateTime(2024, 1, 2, 5, 0, 0, tzinfo=Timezone('UTC')))
+
+    >>> import datetime
+    >>> beg, end = datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)
+    >>> create_daterange(beg, end)
+    (DateTime(2024, 1, 1, 5, 0, 0, tzinfo=Timezone('UTC')), DateTime(2024, 1, 2, 5, 0, 0, tzinfo=Timezone('UTC')))
+
+    >>> beg, end = '1975-05-21T22:00:00-04:00', '1975-05-22T22:00:00-04:00'
+    >>> create_daterange(beg, end)
+    (DateTime(1975, 5, 22, 2, 0, 0, tzinfo=Timezone('UTC')), DateTime(1975, 5, 23, 2, 0, 0, tzinfo=Timezone('UTC')))
+
     """
-    end = DateTime.now(UTC) \
-        if is_null(end) \
-        else DateTime.parse(end).in_timezone(UTC)
-    beg = end.subtract(days=1) \
-        if is_null(beg) \
-        else DateTime.parse(beg).in_timezone(UTC)
+    if is_null(end):
+        end = DateTime.now(UTC)
+    elif isinstance(end, datetime.date):
+        end = DateTime.instance(end).in_timezone(UTC)
+    else:
+        end = DateTime.parse(end).in_timezone(UTC)
+    if is_null(beg):
+        beg = end.subtract(days=1)
+    elif isinstance(beg, datetime.date):
+        beg = DateTime.instance(beg).in_timezone(UTC)
+    else:
+        beg = DateTime.parse(beg).in_timezone(UTC)
     return beg, end
 
 
