@@ -12,12 +12,12 @@ blpapi = { version = "^3.24.2", source = "blpapi" }
 pandas = "*"
 pyarrow = "*"
 numpy = "*"
+opendate = "*"
 
 pywin32 = { version = "303", markers = "sys_platform == 'win32'" }
 pyinstaller = { extras = ["encryption"], version = "^6.1.0" }
 
 libb-util = { git = "https://github.com/bissli/libb-util", rev = "master" }
-libb-date = { git = "https://github.com/bissli/libb-date", rev = "master" }
 
 # == test
 asserts = { version = "*", optional = true }
