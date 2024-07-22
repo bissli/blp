@@ -5,7 +5,7 @@ description = "Simple blpapi wrapper"
 authors = ["bissli <bissli@xyz.com>"]
 
 [tool.poetry.dependencies]
-python = "~3.11"
+python = "^3.9"
 
 blpapi = { version = "^3.24.2", source = "blpapi" }
 
