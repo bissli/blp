@@ -377,6 +377,7 @@ class ReferenceDataRequest(BaseRequest):
         raise_field_error=False,
         decimal_places: int = None,
         return_formatted_value=None,
+        field_parse_custom: dict = {},
         timezone: str = LCL.name,
         force_string=False,
         time_as_datetime=False,
@@ -400,6 +401,7 @@ class ReferenceDataRequest(BaseRequest):
             desired_timezone=self.timezone,
             time_as_datetime=time_as_datetime,
             decimal_places=decimal_places,
+            field_parse_custom=field_parse_custom,
         )
         self.overrides = overrides
 
@@ -962,6 +964,7 @@ class Blp:
         flds,
         timezone: str = LCL.name,
         decimal_places: int = None,
+        field_parse_custom: dict = {},
         raise_security_error=False,
         raise_field_error=False,
         **overrides
@@ -985,6 +988,7 @@ class Blp:
             flds,
             timezone=timezone,
             decimal_places=decimal_places,
+            field_parse_custom=field_parse_custom,
             raise_security_error=raise_security_error,
             raise_field_error=raise_field_error,
             **overrides,

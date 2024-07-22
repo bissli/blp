@@ -53,12 +53,15 @@ class Parser:
         assumed_timezone: Timezone = UTC,
         desired_timezone: Timezone = LCL,
         decimal_places: int = None,
-        time_as_datetime: bool = False
+        time_as_datetime: bool = False,
+        field_parse_custom: dict = {}
+
     ):
         self.assumed_timezone = assumed_timezone or UTC
         self.desired_timezone = desired_timezone or LCL
         self.time_as_datetime = time_as_datetime
         self.decimal_places = decimal_places
+        self.field_parse_custom = field_parse_custom or {}
 
     #
     # iterator wrappers to handle errors in elements
@@ -95,7 +98,10 @@ class Parser:
         if name not in element:
             logger.debug(f'Response did not contain field {name}')
             return np.nan
-        return self.element_as_value(element.getElement(name), force_string)
+        _element = element.getElement(name)
+        if name in self.field_parse_custom:
+            return self.field_parse_custom[name](_element)
+        return self.element_as_value(_element, force_string)
 
     def get_subelement_values(self, element, names, force_string=False):
         """Return a list of values for the specified child fields. If field not in Element then replace with nan."""
