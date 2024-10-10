@@ -849,7 +849,16 @@ class SessionFactory:
         return session
 
 
-class Blp:
+class PostInitCaller(type):
+    """Call __post_init__ after creation
+    """
+    def __call__(cls, *args, **kwargs):
+        obj = type.__call__(cls, *args, **kwargs)
+        obj.__post_init__()
+        return obj
+
+
+class Blp(metaclass=PostInitCaller):
     """Submits requests to the Bloomberg API and dispatches the events back to the request
     object for processing.
     """
@@ -859,6 +868,14 @@ class Blp:
         self.port = port
         self.auth = auth
         self.session = session or SessionFactory.create(host, port, auth)
+
+    def __post_init__(self):
+        try:
+            logger.info('Running session connectivity test...')
+            resp = self.get_reference_data(flds=['ID_BB_GLOBAL'], sids=['IBM US Equity'])
+            assert resp.as_dict()
+        except:
+            raise SessionError('Connectivity test failed.')
 
     def __enter__(self):
         return self
