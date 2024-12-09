@@ -281,8 +281,8 @@ class HistoricalDataRequest(BaseRequest):
             'clz': self.__class__.__name__,
             'symbols': ','.join(self.sids),
             'fields': ','.join(self.fields),
-            'start': self.start.in_timezone(self.timezone).strftime('%Y-%m-%d'),
-            'end': self.end.in_timezone(self.timezone).strftime('%Y-%m-%d'),
+            'start': self.start.in_timezone(self.timezone).strftime('%Y%m%d'),
+            'end': self.end.in_timezone(self.timezone).strftime('%Y%m%d'),
             'period': self.period,
         }
         # TODO: add self.overrides if defined
@@ -295,8 +295,8 @@ class HistoricalDataRequest(BaseRequest):
         request = service.createRequest('HistoricalDataRequest')
         [request.append('securities', sec) for sec in self.sids]
         [request.append('fields', fld) for fld in self.fields]
-        request.set('startDate', self.start)
-        request.set('endDate', self.end)
+        request.set('startDate', self.start.strftime('%Y%m%d'))
+        request.set('endDate', self.end.strftime('%Y%m%d'))
         request.set('periodicitySelection', self.period)
         self.period_adjustment and request.set('periodicityAdjustment', self.period_adjustment)
         self.currency and request.set('currency', self.currency)
