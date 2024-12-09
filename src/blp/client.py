@@ -179,8 +179,8 @@ class HistoricalDataResponse(BaseResponse):
         self.request = request
         self.response_map = {}
 
-    def on_security_complete(self, sid, df):
-        self.response_map[sid] = df.astype(object).where(df.notna(), None) \
+    def on_security_complete(self, ticker, df):
+        self.response_map[ticker] = df.astype(object).where(df.notna(), None) \
             if self.request.force_string else df
 
     def as_dict(self):
@@ -202,13 +202,13 @@ class HistoricalDataRequest(BaseRequest):
 
     Parameters
     ----------
-    sids: Bloomberg security identifier(s).
+    tickers: Bloomberg security identifier(s).
     fields: Bloomberg field name(s).
     start: Optional. Date or date string. Defaults to 1 year ago if None.
     end: Optional. Date or date string. Defaults to today if None.
     period: Optional. Periodicity of data (DAILY, WEEKLY, MONTHLY, QUARTERLY,
       SEMI_ANNUALLY, YEARLY).
-    raise_security_error: If True, raises exceptions for invalid sids.
+    raise_security_error: If True, raises exceptions for invalid tickers.
     raise_field_error: If True, raises exceptions for invalid fields.
     period_adjustment: Frequency and calendar type of the output (ACTUAL,
       CALENDAR, FISCAL).
@@ -223,7 +223,7 @@ class HistoricalDataRequest(BaseRequest):
 
     def __init__(
         self,
-        sids,
+        tickers,
         fields,
         start:datetime.datetime = None,
         end:datetime.datetime = None,
@@ -254,9 +254,9 @@ class HistoricalDataRequest(BaseRequest):
         )
         period = period or 'DAILY'
         assert period in {'DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'SEMI_ANNUALLY', 'YEARLY'}
-        self.is_single_sid = is_single_sid = isinstance(sids, str)
+        self.is_single_ticker = is_single_ticker = isinstance(tickers, str)
         self.is_single_field = is_single_field = isinstance(fields, str)
-        self.sids = [sids] if is_single_sid else list(sids)
+        self.tickers = [tickers] if is_single_ticker else list(tickers)
         self.fields = [fields] if is_single_field else list(fields)
         self.start, self.end = create_daterange(start, end)
         self.timezone = Timezone(timezone)
@@ -279,7 +279,7 @@ class HistoricalDataRequest(BaseRequest):
     def __repr__(self):
         fmtargs = {
             'clz': self.__class__.__name__,
-            'symbols': ','.join(self.sids),
+            'symbols': ','.join(self.tickers),
             'fields': ','.join(self.fields),
             'start': self.start.in_timezone(self.timezone).strftime('%Y%m%d'),
             'end': self.end.in_timezone(self.timezone).strftime('%Y%m%d'),
@@ -293,7 +293,7 @@ class HistoricalDataRequest(BaseRequest):
 
     def create_request(self, service):
         request = service.createRequest('HistoricalDataRequest')
-        [request.append('securities', sec) for sec in self.sids]
+        [request.append('securities', sec) for sec in self.tickers]
         [request.append('fields', fld) for fld in self.fields]
         request.set('startDate', self.start.strftime('%Y%m%d'))
         request.set('endDate', self.end.strftime('%Y%m%d'))
@@ -317,7 +317,7 @@ class HistoricalDataRequest(BaseRequest):
 
     def on_security_data_element(self, element):
         """Process a securityData element - FIXME: currently not handling relateDate element"""
-        sid = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+        ticker = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
         dmap = defaultdict(list)
         for pt in fields.values():
@@ -332,15 +332,15 @@ class HistoricalDataRequest(BaseRequest):
             idx = dmap.pop('date')
             df = pd.DataFrame(dmap, columns=self.fields, index=idx)
             df.index.name = 'date'
-        self.response.on_security_complete(sid, df)
+        self.response.on_security_complete(ticker, df)
 
     def process_response(self, event, is_final):
         for message in self.parser.message_iter(event):
             # single security element in historical request
             element = message.getElement(Name.SECURITY_DATA)
             if Name.SECURITY_ERROR in element:
-                sid = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
-                self.security_errors.append(self.parser.as_security_error(element.getElement(Name.SECURITY_ERROR), sid))
+                ticker = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+                self.security_errors.append(self.parser.as_security_error(element.getElement(Name.SECURITY_ERROR), ticker))
             else:
                 self.on_security_data_element(element)
 
@@ -351,15 +351,15 @@ class ReferenceDataResponse(BaseResponse):
         self.request = request
         self.response_map = defaultdict(dict)
 
-    def on_security_data(self, sid, fieldmap):
-        self.response_map[sid].update(fieldmap)
+    def on_security_data(self, ticker, fieldmap):
+        self.response_map[ticker].update(fieldmap)
 
     def as_dict(self):
         return self.response_map
 
     def as_dataframe(self):
         """:return: Multi-Index DataFrame"""
-        data = {sid: pd.Series(data) for sid, data in self.response_map.items()}
+        data = {ticker: pd.Series(data) for ticker, data in self.response_map.items()}
         df = pd.DataFrame.from_dict(data, orient='index')
         df = df.reindex(self.request.fields, axis=1)  # layer in any missing fields just in case
         if self.request.force_string:
@@ -371,7 +371,7 @@ class ReferenceDataRequest(BaseRequest):
 
     def __init__(
         self,
-        sids,
+        tickers,
         fields,
         raise_security_error=False,
         raise_field_error=False,
@@ -390,9 +390,9 @@ class ReferenceDataRequest(BaseRequest):
             raise_field_error=raise_field_error,
             force_string=force_string,
         )
-        self.is_single_sid = is_single_sid = isinstance(sids, str)
+        self.is_single_ticker = is_single_ticker = isinstance(tickers, str)
         self.is_single_field = is_single_field = isinstance(fields, str)
-        self.sids = [sids] if isinstance(sids, str) else sids
+        self.tickers = [tickers] if isinstance(tickers, str) else tickers
         self.fields = [fields] if isinstance(fields, str) else fields
         self.return_formatted_value = return_formatted_value
         self.timezone = Timezone(timezone)
@@ -408,18 +408,18 @@ class ReferenceDataRequest(BaseRequest):
     def __repr__(self):
         fmtargs = {
             'clz': self.__class__.__name__,
-            'sids': ','.join(self.sids),
+            'tickers': ','.join(self.tickers),
             'fields': ','.join(self.fields),
             'overrides': ','.join([f'{k}={v}' for k, v in self.overrides.items()]),
         }
-        return '<{clz}([{sids}], [{fields}], overrides={overrides})'.format(**fmtargs)
+        return '<{clz}([{tickers}], [{fields}], overrides={overrides})'.format(**fmtargs)
 
     def prepare_response(self):
         self.response = ReferenceDataResponse(self)
 
     def create_request(self, service):
         request = service.createRequest('ReferenceDataRequest')
-        [request.append('securities', sec) for sec in self.sids]
+        [request.append('securities', sec) for sec in self.tickers]
         [request.append('fields', fld) for fld in self.fields]
         self.set_flag(request, self.return_formatted_value, 'returnFormattedValue')
         self.set_flag(request, True, 'useUTCTime')
@@ -435,12 +435,12 @@ class ReferenceDataRequest(BaseRequest):
                 self._process_security_element(element)
 
     def _process_security_element(self, element):
-        sid = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+        ticker = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
         field_data = self.parser.get_subelement_values(fields, self.fields, self.force_string)
         field_data = [x.in_timezone(self.timezone) if isinstance(x, datetime.datetime) else x for x in field_data]
         assert len(field_data) == len(self.fields), 'Field length must match data length'
-        self.response.on_security_data(sid, dict(list(zip(self.fields, field_data))))
+        self.response.on_security_data(ticker, dict(list(zip(self.fields, field_data))))
         field_errors = self.parser.get_field_errors(element)
         field_errors and self.field_errors.extend(field_errors)
 
@@ -467,7 +467,7 @@ class IntradayTickRequest(BaseRequest):
     """
     def __init__(
         self,
-        sid,
+        ticker,
         start: datetime.datetime = None,
         end: datetime.datetime = None,
         timezone: str = LCL.name,
@@ -496,7 +496,7 @@ class IntradayTickRequest(BaseRequest):
         include_bloomberg_standard_condition_codes=None,
     ):
         super().__init__('//blp/refdata')
-        self.sid = sid
+        self.ticker = ticker
         self.events = [events] if isinstance(events, str) else events
         self.include_condition_codes = include_condition_codes
         self.include_nonplottable_events = include_nonplottable_events
@@ -525,15 +525,15 @@ class IntradayTickRequest(BaseRequest):
         self.parser = Parser(UTC, self.timezone)
 
     def __repr__(self):
-        fmtargs = {'clz': self.__class__.__name__, 'sid': self.sid, 'events': ','.join(self.events)}
-        return '<{clz}({sid}, [{events}])'.format(**fmtargs)
+        fmtargs = {'clz': self.__class__.__name__, 'ticker': self.ticker, 'events': ','.join(self.events)}
+        return '<{clz}({ticker}, [{events}])'.format(**fmtargs)
 
     def prepare_response(self):
         self.response = IntradayTickResponse(self)
 
     def create_request(self, service):
         request = service.createRequest('IntradayTickRequest')
-        request.set(Name.SECURITY, self.sid)
+        request.set(Name.SECURITY, self.ticker)
         [request.append('eventTypes', event) for event in self.events]
         request.set('startDateTime', self.start)
         request.set('endDateTime', self.end)
@@ -594,7 +594,7 @@ class IntradayBarRequest(BaseRequest):
 
     def __init__(
         self,
-        sid,
+        ticker,
         start:datetime.datetime = None,
         end:datetime.datetime = None,
         timezone:str = LCL.name,
@@ -615,7 +615,7 @@ class IntradayBarRequest(BaseRequest):
                             If True, bar contains previous values if not ticks during the interval
         """
         super().__init__('//blp/refdata')
-        self.sid = sid
+        self.ticker = ticker
         self.event = event
         self.interval = interval
         self.gap_fill_initial_bar = gap_fill_initial_bar
@@ -631,19 +631,19 @@ class IntradayBarRequest(BaseRequest):
     def __repr__(self):
         fmtargs = {
             'clz': self.__class__.__name__,
-            'sid': self.sid,
+            'ticker': self.ticker,
             'event': self.event,
             'start': self.start.in_timezone(self.timezone),
             'end': self.end.in_timezone(self.timezone),
         }
-        return '<{clz}({sid}, {event}, start={start}, end={end})'.format(**fmtargs)
+        return '<{clz}({ticker}, {event}, start={start}, end={end})'.format(**fmtargs)
 
     def prepare_response(self):
         self.response = IntradayBarResponse(self)
 
     def create_request(self, service):
         request = service.createRequest('IntradayBarRequest')
-        request.set(Name.SECURITY, self.sid)
+        request.set(Name.SECURITY, self.ticker)
         request.set('eventType', self.event)
         request.set('startDateTime', self.start)
         request.set('endDateTime', self.end)
@@ -677,15 +677,15 @@ class EQSResponse(BaseResponse):
         self.request = request
         self.response_map = defaultdict(dict)
 
-    def on_security_data(self, sid, fieldmap):
-        self.response_map[sid].update(fieldmap)
+    def on_security_data(self, ticker, fieldmap):
+        self.response_map[ticker].update(fieldmap)
 
     def as_dict(self):
         return self.response_map
 
     def as_dataframe(self):
         """:return: Multi-Index DataFrame"""
-        data = {sid: pd.Series(data) for sid, data in self.response_map.items()}
+        data = {ticker: pd.Series(data) for ticker, data in self.response_map.items()}
         df = pd.DataFrame.from_dict(data, orient='index')
         return df.astype(object).where(df.notna(), None) if self.request.force_string else df
 
@@ -747,11 +747,11 @@ class EQSRequest(BaseRequest):
                 self._process_security_element(element)
 
     def _process_security_element(self, element):
-        sid = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
+        ticker = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
         fldnames = [str(field.name()) for field in fields.elements()]
         fdata = self.parser.get_subelement_values(fields, fldnames)
-        self.response.on_security_data(sid, dict(list(zip(fldnames, fdata))))
+        self.response.on_security_data(ticker, dict(list(zip(fldnames, fdata))))
         ferrors = self.parser.get_field_errors(element)
         ferrors and self.field_errors.extend(ferrors)
 
@@ -872,7 +872,7 @@ class Blp(metaclass=PostInitCaller):
     def __post_init__(self):
         try:
             logger.info('Running session connectivity test...')
-            resp = self.get_reference_data(flds=['ID_BB_GLOBAL'], sids=['IBM US Equity'])
+            resp = self.get_reference_data(flds=['ID_BB_GLOBAL'], tickers=['IBM US Equity'])
             assert resp.as_dict()
         except:
             raise SessionError('Connectivity test failed.')
@@ -935,7 +935,7 @@ class Blp(metaclass=PostInitCaller):
 
     def get_historical(
         self,
-        sids,
+        tickers,
         flds,
         start:datetime.datetime = None,
         end:datetime.datetime = None,
@@ -949,7 +949,7 @@ class Blp(metaclass=PostInitCaller):
 
         Parameters
         ----------
-        sids :
+        tickers :
         flds :
         start :
         end :
@@ -963,7 +963,7 @@ class Blp(metaclass=PostInitCaller):
 
         """
         req = HistoricalDataRequest(
-            sids,
+            tickers,
             flds,
             start=start,
             end=end,
@@ -977,7 +977,7 @@ class Blp(metaclass=PostInitCaller):
 
     def get_reference_data(
         self,
-        sids,
+        tickers,
         flds,
         timezone: str = LCL.name,
         decimal_places: int = None,
@@ -990,7 +990,7 @@ class Blp(metaclass=PostInitCaller):
 
         Parameters
         ----------
-        sids :
+        tickers :
         flds :
         raise_security_error :
         raise_field_error :
@@ -1001,7 +1001,7 @@ class Blp(metaclass=PostInitCaller):
 
         """
         req = ReferenceDataRequest(
-            sids,
+            tickers,
             flds,
             timezone=timezone,
             decimal_places=decimal_places,
@@ -1014,7 +1014,7 @@ class Blp(metaclass=PostInitCaller):
 
     def get_intraday_tick(
         self,
-        sid,
+        ticker,
         events=None,
         start:datetime.datetime = None,
         end:datetime.datetime = None,
@@ -1046,7 +1046,7 @@ class Blp(metaclass=PostInitCaller):
         if events is None:
             events = ['TRADE', 'ASK', 'BID']
         req = IntradayTickRequest(
-            sid,
+            ticker,
             start=start,
             end=end,
             timezone=timezone,
@@ -1079,7 +1079,7 @@ class Blp(metaclass=PostInitCaller):
 
     def get_intraday_bar(
         self,
-        sid,
+        ticker,
         event='TRADE',
         start:datetime.datetime = None,
         end:datetime.datetime = None,
@@ -1093,7 +1093,7 @@ class Blp(metaclass=PostInitCaller):
         adjustment_follow_DPDF=None,
     ):
         req = IntradayBarRequest(
-            sid,
+            ticker,
             start=start,
             end=end,
             timezone=timezone,
@@ -1174,7 +1174,7 @@ class Subscription:
 
         Parameters
         ----------
-        topics :  (Sids, but also custom Bloomberg mnemonics IE @MSG1). IE ['IBM US Equity', 'TSLA US Equity' ]
+        topics :  (tickers, but also custom Bloomberg mnemonics IE @MSG1). IE ['IBM US Equity', 'TSLA US Equity' ]
         fields :  IE `['BID', 'ASK', 'TRADE']`
         interval :  Time in seconds to intervalize the subscriptions
         host : For session creation. See SessionFactory.
