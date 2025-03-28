@@ -7,15 +7,14 @@ authors = ["bissli <bissli@xyz.com>"]
 [tool.poetry.dependencies]
 python = "^3.9"
 
-blpapi = { version = "^3.24.2", source = "blpapi" }
+blpapi = { version = "*", source = "blpapi" }
 
 pandas = "*"
 pyarrow = "*"
 numpy = "*"
 opendate = "*"
 
-pywin32 = { version = "303", markers = "sys_platform == 'win32'" }
-pyinstaller = { extras = ["encryption"], version = "*" }
+pywin32 = { version = "*", markers = "sys_platform == 'win32'" }
 
 libb-util = { git = "https://github.com/bissli/libb-util" }
 
