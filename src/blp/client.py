@@ -779,6 +779,7 @@ def create_session(
     host='localhost',
     port=8194,
     auth='AuthenticationType=OS_LOGON',
+    application_identity_key=None,
     event_handler=None,
     event_dispatcher=None,
     event_queue_size=10000,
@@ -807,6 +808,8 @@ def create_session(
     session_options.setServerPort(port)
     session_options.setAuthenticationOptions(auth)
     session_options.setMaxEventQueueSize(event_queue_size)
+    if application_identity_key:
+        session_options.setApplicationIdentityKey(application_identity_key)
     return Session(session_options, event_handler, event_dispatcher)
 
 
@@ -818,6 +821,7 @@ class SessionFactory:
         host='localhost',
         port=8194,
         auth='AuthenticationType=OS_LOGON',
+        application_identity_key=None,
         event_handler=None,
         event_dispatcher=None,
     ) -> Session:
@@ -841,7 +845,14 @@ class SessionFactory:
 
         """
         logger.info('Connecting to Bloomberg BBComm session...')
-        session = create_session(host, port, auth, event_handler, event_dispatcher)
+        session = create_session(
+            host=host,
+            port=port,
+            auth=auth,
+            event_handler=event_handler,
+            event_dispatcher=event_dispatcher,
+            application_identity_key=application_identity_key
+        )
         if not session.start():
             raise SessionCreateError('Failed to start session.')
         envuser = win32api.GetUserNameEx(win32con.NameSamCompatible)
@@ -863,11 +874,17 @@ class Blp(metaclass=PostInitCaller):
     object for processing.
     """
 
-    def __init__(self, host='localhost', port=8194, auth='AuthenticationType=OS_LOGON', session=None):
+    def __init__(self, host='localhost', port=8194, auth='AuthenticationType=OS_LOGON', application_identity_key=None, session=None):
         self.host = host
         self.port = port
         self.auth = auth
-        self.session = session or SessionFactory.create(host, port, auth)
+        self.application_identity_key = application_identity_key
+        self.session = session or SessionFactory.create(
+            host=host,
+            port=port,
+            auth=auth,
+            application_identity_key=application_identity_key,
+        )
 
     def __post_init__(self):
         try:
@@ -1132,9 +1149,6 @@ class Blp(metaclass=PostInitCaller):
         topics,
         fields,
         interval=0,
-        host='localhost',
-        port=8194,
-        auth='AuthenticationType=OS_LOGON',
         dispatcher=None,
         runtime=24*60*60,
         handler=DefaultEventHandler,
@@ -1145,9 +1159,10 @@ class Blp(metaclass=PostInitCaller):
             topics=topics,
             fields=fields,
             interval=interval,
-            host=host,
-            port=port,
-            auth=auth,
+            host=self.host,
+            port=self.port,
+            auth=self.auth,
+            application_identity_key=self.application_identity_key,
             dispatcher=dispatcher,
         )
         sub.subscribe(runtime=runtime, handler=handler, **kwargs)
@@ -1168,6 +1183,7 @@ class Subscription:
         host='localhost',
         port=8194,
         auth='AuthenticationType=OS_LOGON',
+        application_identity_key=None,
         dispatcher=None,
     ):
         """
@@ -1180,6 +1196,7 @@ class Subscription:
         host : For session creation. See SessionFactory.
         port : For session creation. See SessionFactory.
         auth : For session creation. See SessionFactory.
+        auth : For session creation. See SessionFactory.
         dispatcher :  if None, will create a defualt Dispatcher (single thread)
 
         """
@@ -1189,6 +1206,7 @@ class Subscription:
         self.host = host
         self.port = port
         self.auth = auth
+        self.application_identity_key = application_identity_key
         self.dispatcher = dispatcher
 
     def subscribe(self, handler: BaseEventHandler, runtime=24 * 60 * 60, **kwargs):
@@ -1210,7 +1228,14 @@ class Subscription:
 
         """
         _handler = handler(self.topics, self.fields, **kwargs)
-        session = SessionFactory.create(self.host, self.port, self.auth, _handler, self.dispatcher)
+        session = SessionFactory.create(
+            host=self.host,
+            port=self.port,
+            auth=self.auth,
+            event_handler=_handler,
+            event_dispatcher=self.dispatcher,
+            application_identity_key=self.application_identity_key,
+        )
         session.open_service('//blp/mktdata')
 
         subscriptions = blpapi.SubscriptionList()
