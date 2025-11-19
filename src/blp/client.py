@@ -5,6 +5,8 @@ import atexit
 import contextlib
 import datetime
 import logging
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
@@ -883,7 +885,7 @@ class Blp(metaclass=PostInitCaller):
     def __exit__(self, exc_ty, exc_val, tb):
         logger.debug('Exiting Blp context')
         if exc_ty:
-            logger.exception(exc_val)
+            logger.error(exc_val)
         self.session.cleanup()
 
     def __repr__(self):
@@ -1138,6 +1140,7 @@ class Blp(metaclass=PostInitCaller):
         dispatcher=None,
         runtime=24*60*60,
         handler=DefaultEventHandler,
+        shutdown_event: threading.Event = None,
         **kwargs
     ):
         """Create subscription request"""
@@ -1150,7 +1153,7 @@ class Blp(metaclass=PostInitCaller):
             auth=auth,
             dispatcher=dispatcher,
         )
-        sub.subscribe(runtime=runtime, handler=handler, **kwargs)
+        sub.subscribe(runtime=runtime, handler=handler, shutdown_event=shutdown_event, **kwargs)
 
 
 class Subscription:
@@ -1191,7 +1194,13 @@ class Subscription:
         self.auth = auth
         self.dispatcher = dispatcher
 
-    def subscribe(self, handler: BaseEventHandler, runtime=24 * 60 * 60, **kwargs):
+    def subscribe(
+        self,
+        handler: BaseEventHandler,
+        runtime=24 * 60 * 60,
+        shutdown_event: threading.Event = None,
+        **kwargs
+    ):
         r"""Subscribe with a given handler
 
         Parameters
@@ -1217,13 +1226,24 @@ class Subscription:
         options = {'interval': f'{self.interval:.1f}'} if self.interval else {}
         for topic in self.topics:
             subscriptions.add(topic, self.fields, options, blpapi.CorrelationId(topic))
+
         try:
             logger.info('Starting subscription...')
             session.subscribe(subscriptions)
-            delay = NonBlockingDelay()
-            delay.delay(runtime)
-            while not delay.timeout():
-                continue
+
+            # Use shutdown_event if provided, otherwise run full duration
+            if shutdown_event:
+                start_time = time.time()
+                while time.time() - start_time < runtime:
+                    if shutdown_event.is_set():
+                        logger.info('Shutdown event detected, ending subscription')
+                        break
+                    shutdown_event.wait(timeout=1.0)  # Check every second
+            else:
+                delay = NonBlockingDelay()
+                delay.delay(runtime)
+                while not delay.timeout():
+                    continue
         finally:
             logger.info('Ending subscription...')
             session.unsubscribe(subscriptions)
