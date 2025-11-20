@@ -104,15 +104,20 @@ class BaseRequest(ABC):
         self.response = None
 
     @abstractmethod
-    def prepare_response(self):
-        pass
+    def prepare_response(self) -> None:
+        """Initialize the response object for this request.
+        """
 
     @property
-    def has_exception(self):
+    def has_exception(self) -> bool:
+        """Check if request has security or field errors that should raise exceptions.
+        """
         return (self.raise_security_error and self.security_errors) \
             or (self.raise_field_error and self.field_errors)
 
-    def raise_exception(self):
+    def raise_exception(self) -> None:
+        """Raise or log exceptions based on error configuration.
+        """
         if self.security_errors:
             msgs = ''.join([str(s) for s in self.security_errors])
             if self.raise_security_error:
@@ -125,14 +130,18 @@ class BaseRequest(ABC):
             logger.debug(f'Field Errors:\n{msgs}')
 
     @abstractmethod
-    def create_request(self, service):
-        pass
+    def create_request(self, service) -> blpapi.Request:
+        """Create Bloomberg API request object from service.
+        """
 
     @abstractmethod
-    def process_response(self, event, is_final):
-        pass
+    def process_response(self, event, is_final) -> None:
+        """Process response event and update response object.
+        """
 
-    def on_admin_event(self, event):
+    def on_admin_event(self, event) -> None:
+        """Handle administrative session events.
+        """
         for message in event:
             if message.messageType() == Name.SESSION_CONNECTION_UP:
                 logger.info('Connected ...')
@@ -145,21 +154,25 @@ class BaseRequest(ABC):
                 raise SessionTerminatedError('Session DONE')
 
     @staticmethod
-    def apply_overrides(request, overrides):
+    def apply_overrides(request, overrides) -> None:
+        """Apply field overrides to the request.
+        """
         if overrides:
             for k, v in overrides.items():
                 o = request.getElement('overrides').appendElement()
                 o.setElement(Name.FIELD_ID, k)
                 o.setElement('value', v)
 
-    def set_flag(self, request, val, fld):
-        """If the specified val is not None, then set the specified field to its boolean value"""
+    def set_flag(self, request, val, fld) -> None:
+        """If the specified val is not None, then set the specified field to its boolean value.
+        """
         if val is not None:
             val = bool(val)
             request.set(fld, val)
 
-    def set_response(self, response):
-        """Set the response to handle and store the results"""
+    def set_response(self, response) -> None:
+        """Set the response to handle and store the results.
+        """
         self.response = response
 
 
@@ -167,12 +180,14 @@ class BaseResponse(ABC):
     """Base class for Responses"""
 
     @abstractmethod
-    def as_dataframe(self):
-        pass
+    def as_dataframe(self) -> pd.DataFrame:
+        """Convert response to pandas DataFrame.
+        """
 
     @abstractmethod
-    def as_dict(self):
-        pass
+    def as_dict(self) -> dict:
+        """Convert response to dictionary.
+        """
 
 
 class HistoricalDataResponse(BaseResponse):
@@ -181,7 +196,9 @@ class HistoricalDataResponse(BaseResponse):
         self.request = request
         self.response_map = {}
 
-    def on_security_complete(self, ticker, df):
+    def on_security_complete(self, ticker: str, df: pd.DataFrame) -> None:
+        """Store completed security data in response map.
+        """
         self.response_map[ticker] = df.astype(object).where(df.notna(), None) \
             if self.request.force_string else df
 
@@ -317,8 +334,9 @@ class HistoricalDataRequest(BaseRequest):
             self.apply_overrides(request, self.overrides)
         return request
 
-    def on_security_data_element(self, element):
-        """Process a securityData element - FIXME: currently not handling relateDate element"""
+    def on_security_data_element(self, element) -> None:
+        """Process a securityData element - FIXME: currently not handling relateDate element.
+        """
         ticker = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
         dmap = defaultdict(list)
@@ -336,7 +354,9 @@ class HistoricalDataRequest(BaseRequest):
             df.index.name = 'date'
         self.response.on_security_complete(ticker, df)
 
-    def process_response(self, event, is_final):
+    def process_response(self, event, is_final) -> None:
+        """Process response event and update response object.
+        """
         for message in self.parser.message_iter(event):
             # single security element in historical request
             element = message.getElement(Name.SECURITY_DATA)
@@ -353,7 +373,9 @@ class ReferenceDataResponse(BaseResponse):
         self.request = request
         self.response_map = defaultdict(dict)
 
-    def on_security_data(self, ticker, fieldmap):
+    def on_security_data(self, ticker: str, fieldmap: dict) -> None:
+        """Store security field data in response map.
+        """
         self.response_map[ticker].update(fieldmap)
 
     def as_dict(self):
@@ -428,7 +450,9 @@ class ReferenceDataRequest(BaseRequest):
         self.apply_overrides(request, self.overrides)
         return request
 
-    def process_response(self, event, is_final):
+    def process_response(self, event, is_final) -> None:
+        """Process response event and update response object.
+        """
         for msg in self.parser.message_iter(event):
             for element, err in self.parser.security_element_iter(msg.getElement(Name.SECURITY_DATA)):
                 if err:
@@ -436,7 +460,9 @@ class ReferenceDataRequest(BaseRequest):
                     continue
                 self._process_security_element(element)
 
-    def _process_security_element(self, element):
+    def _process_security_element(self, element) -> None:
+        """Extract and store field data from security element.
+        """
         ticker = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
         field_data = self.parser.get_subelement_values(fields, self.fields, self.force_string)
@@ -563,14 +589,17 @@ class IntradayTickRequest(BaseRequest):
         self.set_flag(request, self.include_bloomberg_standard_condition_codes, 'includeBloombergStandardConditionCodes')
         return request
 
-    def on_tick_data(self, ticks):
-        """Process the incoming tick data array"""
+    def on_tick_data(self, ticks) -> None:
+        """Process the incoming tick data array.
+        """
         for tick in self.parser.element_iter(ticks):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
             tickmap = {n: self.parser.get_subelement_value(tick, n) for n in names}
             self.response.ticks.append(tickmap)
 
-    def process_response(self, event, is_final):
+    def process_response(self, event, is_final) -> None:
+        """Process response event and update response object.
+        """
         for msg in self.parser.message_iter(event):
             tdata = msg.getElement('tickData')
             # tickData will have 0 to 1 tickData[] elements
@@ -658,14 +687,17 @@ class IntradayBarRequest(BaseRequest):
         self.set_flag(request, self.adjustment_follow_DPDF, 'adjustmentFollowDPDF')
         return request
 
-    def on_bar_data(self, bars):
-        """Process the incoming tick data array"""
+    def on_bar_data(self, bars) -> None:
+        """Process the incoming bar data array.
+        """
         for tick in self.parser.element_iter(bars):
             names = [str(tick.getElement(_).name()) for _ in range(tick.numElements())]
             barmap = {n: self.parser.get_subelement_value(tick, n) for n in names}
             self.response.bars.append(barmap)
 
-    def process_response(self, event, is_final):
+    def process_response(self, event, is_final) -> None:
+        """Process response event and update response object.
+        """
         for msg in self.parser.message_iter(event):
             data = msg.getElement('barData')
             # tickData will have 0 to 1 tickData[] elements
@@ -738,7 +770,9 @@ class EQSRequest(BaseRequest):
         overrides and self.apply_overrides(request, overrides)
         return request
 
-    def process_response(self, event, is_final):
+    def process_response(self, event, is_final) -> None:
+        """Process response event and update response object.
+        """
         for message in self.parser.message_iter(event):
             data = message.getElement('data')
             security = data.getElement(Name.SECURITY_DATA)
@@ -748,7 +782,9 @@ class EQSRequest(BaseRequest):
                     continue
                 self._process_security_element(element)
 
-    def _process_security_element(self, element):
+    def _process_security_element(self, element) -> None:
+        """Extract and store field data from security element.
+        """
         ticker = self.parser.get_subelement_value(element, Name.SECURITY, self.force_string)
         fields = element.getElement(Name.FIELD_DATA)
         fldnames = [str(field.name()) for field in fields.elements()]
@@ -765,12 +801,15 @@ class Session(blpapi.Session):
         super().__init__(*args)
         atexit.register(self.cleanup)
 
-    def open_service(self, service_name):
-        """Open service. Raise Exception if fails."""
+    def open_service(self, service_name: str) -> None:
+        """Open service. Raise Exception if fails.
+        """
         if not self.openService(service_name):
             raise SessionStartError(f'Failed to open service {service_name}.')
 
-    def cleanup(self):
+    def cleanup(self) -> None:
+        """Cleanup and destroy session resources.
+        """
         with contextlib.suppress(Exception):
             self.stop()
             self.destroy()
@@ -846,8 +885,11 @@ class SessionFactory:
         session = create_session(host, port, auth, event_handler, event_dispatcher)
         if not session.start():
             raise SessionCreateError('Failed to start session.')
-        envuser = win32api.GetUserNameEx(win32con.NameSamCompatible)
-        logger.info(f'Connected to Bloomberg BBComm as {envuser}')
+        try:
+            envuser = win32api.GetUserNameEx(win32con.NameSamCompatible)
+            logger.info(f'Connected to Bloomberg BBComm as {envuser}')
+        except (NameError, Exception):
+            logger.info('Connected to Bloomberg BBComm')
         return session
 
 
@@ -898,6 +940,8 @@ class Blp(metaclass=PostInitCaller):
         return '<{clz}({host}:{port}:{auth})'.format(**fmtargs)
 
     def execute(self, request: BaseRequest) -> BaseResponse:
+        """Execute a Bloomberg API request and return the response.
+        """
         logger.info(f'Sending request: {repr(request)}')
         self.session.open_service(request.service_name)
         service = self.session.getService(request.service_name)
@@ -907,8 +951,8 @@ class Blp(metaclass=PostInitCaller):
         return self._wait_for_response(request)
 
     def _wait_for_response(self, request: BaseRequest) -> BaseResponse:
-        """Waits for response after sending the request.
-
+        """Wait for response after sending request, handling partial and final events.
+        
         Success response can come with a number of
         PARTIAL_RESPONSE events followed by a RESPONSE event.
         Failures will be delivered in a REQUEST_STATUS event
@@ -1142,8 +1186,9 @@ class Blp(metaclass=PostInitCaller):
         handler=DefaultEventHandler,
         shutdown_event: threading.Event = None,
         **kwargs
-    ):
-        """Create subscription request"""
+    ) -> BaseEventHandler:
+        """Create subscription request and return the handler instance for data access.
+        """
         sub = Subscription(
             topics=topics,
             fields=fields,
@@ -1153,7 +1198,7 @@ class Blp(metaclass=PostInitCaller):
             auth=auth,
             dispatcher=dispatcher,
         )
-        sub.subscribe(runtime=runtime, handler=handler, shutdown_event=shutdown_event, **kwargs)
+        return sub.subscribe(runtime=runtime, handler=handler, shutdown_event=shutdown_event, **kwargs)
 
 
 class Subscription:
@@ -1200,8 +1245,8 @@ class Subscription:
         runtime=24 * 60 * 60,
         shutdown_event: threading.Event = None,
         **kwargs
-    ):
-        r"""Subscribe with a given handler
+    ) -> BaseEventHandler:
+        r"""Subscribe with a given handler and return handler instance.
 
         Parameters
         ----------
@@ -1231,14 +1276,13 @@ class Subscription:
             logger.info('Starting subscription...')
             session.subscribe(subscriptions)
 
-            # Use shutdown_event if provided, otherwise run full duration
             if shutdown_event:
                 start_time = time.time()
                 while time.time() - start_time < runtime:
                     if shutdown_event.is_set():
                         logger.info('Shutdown event detected, ending subscription')
                         break
-                    shutdown_event.wait(timeout=1.0)  # Check every second
+                    shutdown_event.wait(timeout=1.0)
             else:
                 delay = NonBlockingDelay()
                 delay.delay(runtime)
@@ -1247,3 +1291,6 @@ class Subscription:
         finally:
             logger.info('Ending subscription...')
             session.unsubscribe(subscriptions)
+            session.cleanup()
+
+        return _handler

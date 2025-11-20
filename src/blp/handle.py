@@ -37,8 +37,8 @@ class BaseEventHandler(ABC):
         )
 
     @abstractmethod
-    def emit(self, topic: str, row: dict[str: Any]):
-        """Triggerd by BaseEventHandler on data event.
+    def emit(self, topic: str, row: dict[str, Any]) -> None:
+        """Triggered by BaseEventHandler on data event.
 
         Topic: topic from topics
         Row: {field: field value}
@@ -46,9 +46,8 @@ class BaseEventHandler(ABC):
         Implement any handling logic here.
         """
 
-    def __call__(self, event, *args):
-        """This method is called from Bloomberg session in a separate thread
-        for each incoming event.
+    def __call__(self, event, *args) -> None:
+        """This method is called from Bloomberg session in a separate thread for each incoming event.
         """
         try:
             match event.eventType():
@@ -63,7 +62,9 @@ class BaseEventHandler(ABC):
         except blpapi.Exception as exception:
             logger.error(f'Failed to process event {event}: {exception}')
 
-    def _on_status_event(self, event):
+    def _on_status_event(self, event) -> None:
+        """Handle subscription status events.
+        """
         logger.debug('Event triggered: subscription status')
         for message in self.parser.message_iter(event):
             topic = message.correlationId().value()
@@ -75,8 +76,9 @@ class BaseEventHandler(ABC):
                     # subscription can be terminated if the session identity is revoked.
                     logger.error(f'Subscription for {topic} TERMINATED')
 
-    def _on_data_event(self, event):
-        """Return a full mapping of fields to parsed values"""
+    def _on_data_event(self, event) -> None:
+        """Process data events and emit field values.
+        """
         logger.debug('Event triggered: subscription data')
         for message in self.parser.message_iter(event):
             row = {}
@@ -87,7 +89,9 @@ class BaseEventHandler(ABC):
                     row[field] = val
             self.emit(topic, row)
 
-    def _on_other_event(self, event):
+    def _on_other_event(self, event) -> None:
+        """Handle internal warning events.
+        """
         logger.debug('Event triggered: internal warning event')
         for message in event:
             match message.messageType():
@@ -125,10 +129,12 @@ class BaseEventHandler(ABC):
 
 
 class LoggingEventHandler(BaseEventHandler):
-    """Log to debug the emit message"""
+    """Log to debug the emit message.
+    """
 
-    def emit(self, topic, row, **kwargs):
-        super().emit(topic, row, **kwargs)
+    def emit(self, topic: str, row: dict[str, Any]) -> None:
+        """Emit event data with debug logging.
+        """
         logger.debug(f'Event: {topic}: {row}')
 
 
@@ -160,7 +166,9 @@ class DefaultEventHandler(LoggingEventHandler):
         if self.index:
             self.frame.index = self.index
 
-    def emit(self, topic, row):
+    def emit(self, topic: str, row: dict[str, Any]) -> None:
+        """Update DataFrame with new field values for the given topic.
+        """
         super().emit(topic, row)
 
         ridx = self.frame.index.get_loc(topic)
