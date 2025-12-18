@@ -16,7 +16,7 @@ opendate = "*"
 
 pywin32 = { version = "*", markers = "sys_platform == 'win32'" }
 
-libb-util = { git = "https://github.com/bissli/libb-util" }
+libb-util = "*"
 
 # == test
 asserts = { version = "*", optional = true }
