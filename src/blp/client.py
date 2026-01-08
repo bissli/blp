@@ -4,6 +4,7 @@ See HistoricalDataResponse
 import atexit
 import contextlib
 import datetime
+import json
 import logging
 import threading
 import time
@@ -28,11 +29,31 @@ except ModuleNotFoundError:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    # Main client
     'Blp',
+    # Session
+    'Session',
+    'SessionFactory',
     'SessionError',
     'SessionCreateError',
     'SessionStartError',
     'SessionTerminatedError',
+    # Requests
+    'HistoricalDataRequest',
+    'ReferenceDataRequest',
+    'IntradayTickRequest',
+    'IntradayBarRequest',
+    'EQSRequest',
+    'BQLRequest',
+    # Responses
+    'HistoricalDataResponse',
+    'ReferenceDataResponse',
+    'IntradayTickResponse',
+    'IntradayBarResponse',
+    'EQSResponse',
+    'BQLResponse',
+    # Subscription
+    'Subscription',
 ]
 
 
@@ -794,6 +815,131 @@ class EQSRequest(BaseRequest):
         ferrors and self.field_errors.extend(ferrors)
 
 
+class BQLResponse(BaseResponse):
+    """Response for BQL queries, one DataFrame per field.
+    """
+
+    def __init__(self, request):
+        self.request = request
+        self.response_map = {}
+
+    def on_field_data(self, field_name: str, df: pd.DataFrame) -> None:
+        """Store DataFrame for a field.
+        """
+        self.response_map[field_name] = df
+
+    def as_dict(self) -> dict:
+        return self.response_map
+
+    def as_dataframe(self) -> pd.DataFrame:
+        """Combine all field DataFrames by joining on common columns.
+        """
+        if not self.response_map:
+            return pd.DataFrame()
+        dfs = list(self.response_map.values())
+        result = dfs[0]
+        for df in dfs[1:]:
+            common_cols = list(set(result.columns) & set(df.columns))
+            if common_cols:
+                result = result.merge(df, on=common_cols, how='outer')
+        if self.request.force_string:
+            result = result.astype(object).where(result.notna(), None)
+        return result
+
+
+class BQLRequest(BaseRequest):
+    """Bloomberg Query Language (BQL) Request using //blp/bqlsvc service.
+    """
+
+    def __init__(
+        self,
+        expression: str = None,
+        universe: str = None,
+        fields: str = None,
+        raise_security_error=False,
+        raise_field_error=False,
+        force_string=False,
+    ):
+        super().__init__(
+            '//blp/bqlsvc',
+            raise_security_error=raise_security_error,
+            raise_field_error=raise_field_error,
+            force_string=force_string,
+        )
+        self.expression = self._build_expression(expression, universe, fields)
+
+    def _build_expression(self, expression: str, universe: str, fields: str) -> str:
+        """Build BQL expression from components or return provided expression.
+        """
+        if expression:
+            return expression
+        if not universe or not fields:
+            raise ValueError("Either 'expression' or both 'universe' and 'fields' must be provided")
+        return f'get({fields}) for({universe})'
+
+    def __repr__(self):
+        fmtargs = {
+            'clz': self.__class__.__name__,
+            'expression': self.expression[:50] + '...' if len(self.expression) > 50 else self.expression,
+        }
+        return '<{clz}({expression})'.format(**fmtargs)
+
+    def prepare_response(self):
+        self.response = BQLResponse(self)
+
+    def create_request(self, service):
+        request = service.createRequest('sendQuery')
+        request.set('expression', self.expression)
+        try:
+            ctx = request.getElement('clientContext')
+            ctx.setElement('appName', 'EXCEL')
+        except blpapi.NotFoundException:
+            pass
+        return request
+
+    def process_response(self, event, is_final) -> None:
+        """Process BQL response events using message.toPy() for dict conversion.
+        """
+        for message in event:
+            msg_data = message.toPy()
+            if isinstance(msg_data, str):
+                msg_dict = json.loads(msg_data)
+            else:
+                msg_dict = msg_data
+            self._process_bql_dict(msg_dict)
+
+    def _process_bql_dict(self, msg_dict: dict) -> None:
+        """Parse BQL response structure into DataFrames.
+        """
+        exceptions = msg_dict.get('responseExceptions') or []
+        if exceptions:
+            for exc in exceptions:
+                error_msg = exc.get('message') or exc.get('internalMessage') or 'Unknown BQL error'
+                self.security_errors.append(error_msg)
+            return
+
+        results = msg_dict.get('results') or {}
+        for field_name, content in results.items():
+            df = self._parse_field_result(field_name, content)
+            self.response.on_field_data(field_name, df)
+
+    def _parse_field_result(self, field_name: str, content: dict) -> pd.DataFrame:
+        """Parse a single field's result into a DataFrame.
+        """
+        data = {}
+        id_col = content.get('idColumn', {})
+        data['ID'] = id_col.get('values', [])
+        val_col = content.get('valuesColumn', {})
+        data[field_name] = val_col.get('values', [])
+        for sec_col in content.get('secondaryColumns', []):
+            col_name = sec_col.get('name', '')
+            data[col_name] = sec_col.get('values', [])
+
+        df = pd.DataFrame(data)
+        df = df.replace('NaN', pd.NA)
+        return df
+
+
 class Session(blpapi.Session):
     """Wrapper around blpapi.Session with auto-closing"""
 
@@ -918,11 +1064,18 @@ class Blp(metaclass=PostInitCaller):
     object for processing.
     """
 
-    def __init__(self, host='localhost', port=8194, auth='AuthenticationType=OS_LOGON', application_identity_key=None, session=None):
+    def __init__(self,
+                 host='localhost',
+                 port=8194,
+                 auth='AuthenticationType=OS_LOGON',
+                 application_identity_key=None,
+                 session=None,
+                 skip_test=False):
         self.host = host
         self.port = port
         self.auth = auth
         self.application_identity_key = application_identity_key
+        self.skip_test = skip_test
         self.session = session or SessionFactory.create(
             host=host,
             port=port,
@@ -931,6 +1084,8 @@ class Blp(metaclass=PostInitCaller):
         )
 
     def __post_init__(self):
+        if self.skip_test:
+            return
         try:
             logger.info('Running session connectivity test...')
             resp = self.get_reference_data(flds=['ID_BB_GLOBAL'], tickers=['IBM US Equity'])
@@ -969,7 +1124,7 @@ class Blp(metaclass=PostInitCaller):
 
     def _wait_for_response(self, request: BaseRequest) -> BaseResponse:
         """Wait for response after sending request, handling partial and final events.
-        
+
         Success response can come with a number of
         PARTIAL_RESPONSE events followed by a RESPONSE event.
         Failures will be delivered in a REQUEST_STATUS event
@@ -1187,6 +1342,38 @@ class Blp(metaclass=PostInitCaller):
             asof=asof,
             language=language,
             timezone=timezone,
+        )
+        return self.execute(req)
+
+    def bql(
+        self,
+        expression: str = None,
+        universe: str = None,
+        fields: str = None,
+        raise_security_error=False,
+        raise_field_error=False,
+    ) -> BQLResponse:
+        """Equivalent of Excel BQL() function.
+
+        Parameters
+        ----------
+        expression : Complete BQL expression, e.g. "get(px_last) for(['AAPL US Equity'])"
+        universe : Universe clause if expression not provided
+        fields : Fields clause if expression not provided
+        raise_security_error :
+        raise_field_error :
+
+        Returns
+        -------
+        BQLResponse
+
+        """
+        req = BQLRequest(
+            expression=expression,
+            universe=universe,
+            fields=fields,
+            raise_security_error=raise_security_error,
+            raise_field_error=raise_field_error,
         )
         return self.execute(req)
 
