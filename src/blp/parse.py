@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from blpapi.datatype import DataType
 
-from date import LCL, UTC, Date, DateTime, Time, Timezone
+from opendate import LCL, UTC, Date, DateTime, Time, Timezone
 from libb import round_digit_string, underscore_to_camelcase
 
 logger = logging.getLogger(__name__)
@@ -54,12 +54,14 @@ class Parser:
         desired_timezone: Timezone = LCL,
         decimal_places: int = None,
         time_as_datetime: bool = False,
+        include_ticker_field = False,
         field_parse_custom: dict = {}
 
     ):
         self.assumed_timezone = assumed_timezone or UTC
         self.desired_timezone = desired_timezone or LCL
         self.time_as_datetime = time_as_datetime
+        self.include_ticker_field = include_ticker_field
         self.decimal_places = decimal_places
         self.field_parse_custom = field_parse_custom or {}
 
@@ -226,6 +228,9 @@ class Parser:
                 cols = [str(_.name()) for _ in element.elements()]
             for subelement in element.elements():
                 data[str(subelement.name())].append(self.element_as_value(subelement))
+        if self.include_ticker_field:
+            data['ticker'] = None
+            data['field'] = None
         return pd.DataFrame(data, columns=cols)
 
     def _sequence_as_json(self, elements) -> str:

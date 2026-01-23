@@ -12,7 +12,7 @@ import pandas as pd
 from blpapi.event import Event
 
 from blp.parse import Name, Parser
-from date import LCL
+from opendate import LCL
 
 logger = logging.getLogger(__name__)
 

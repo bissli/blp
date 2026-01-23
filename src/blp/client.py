@@ -17,7 +17,7 @@ from blpapi.event import Event
 
 from blp.handle import BaseEventHandler, DefaultEventHandler
 from blp.parse import Name, Parser
-from date import LCL, UTC, DateTime, Timezone
+from opendate import LCL, UTC, DateTime, Timezone
 from libb import NonBlockingDelay, is_null
 
 try:
@@ -426,6 +426,7 @@ class ReferenceDataRequest(BaseRequest):
         timezone: str = LCL.name,
         force_string=False,
         time_as_datetime=False,
+        include_ticker_field=False,
         **overrides,
     ):
         """response_type: (df, map) how to return the results"""
@@ -447,6 +448,7 @@ class ReferenceDataRequest(BaseRequest):
             time_as_datetime=time_as_datetime,
             decimal_places=decimal_places,
             field_parse_custom=field_parse_custom,
+            include_ticker_field=include_ticker_field,
         )
         self.overrides = overrides
 
@@ -1202,6 +1204,7 @@ class Blp(metaclass=PostInitCaller):
         field_parse_custom: dict = {},
         raise_security_error=False,
         raise_field_error=False,
+        include_ticker_field=False,
         **overrides
     ) -> ReferenceDataResponse:
         """Equivalent of Excel BDP Request.
@@ -1226,6 +1229,7 @@ class Blp(metaclass=PostInitCaller):
             field_parse_custom=field_parse_custom,
             raise_security_error=raise_security_error,
             raise_field_error=raise_field_error,
+            include_ticker_field=False,
             **overrides,
         )
         return self.execute(req)
