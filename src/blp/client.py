@@ -38,6 +38,7 @@ __all__ = [
     'SessionCreateError',
     'SessionStartError',
     'SessionTerminatedError',
+    'SessionNotAvailableError',
     # Requests
     'HistoricalDataRequest',
     'ReferenceDataRequest',
@@ -104,6 +105,10 @@ class SessionStartError(SessionError):
 
 class SessionTerminatedError(SessionError):
     """Handle start terminated failed event"""
+
+
+class SessionNotAvailableError(SessionError):
+    """No usable Bloomberg session on this host (e.g. terminal not logged in)."""
 
 
 class BaseRequest(ABC):
@@ -1101,7 +1106,10 @@ class Blp(metaclass=PostInitCaller):
     def __exit__(self, exc_ty, exc_val, tb):
         logger.debug('Exiting Blp context')
         if exc_ty:
-            logger.error(exc_val)
+            if isinstance(exc_val, SessionError):
+                logger.debug(f'Blp context exited with session error: {exc_val}')
+            else:
+                logger.error(exc_val)
         self.session.cleanup()
 
     def __repr__(self):
@@ -1504,6 +1512,10 @@ class Subscription:
                 delay.delay(runtime)
                 while not delay.timeout():
                     continue
+        except blpapi.Exception as exc:
+            if 'Session Not Started' in str(exc) or type(exc).__name__ == 'InvalidStateException':
+                raise SessionNotAvailableError(str(exc)) from exc
+            raise
         finally:
             logger.info('Ending subscription...')
             session.unsubscribe(subscriptions)
