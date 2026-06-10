@@ -1125,10 +1125,15 @@ class Blp(metaclass=PostInitCaller):
         """Execute a Bloomberg API request and return the response.
         """
         logger.info(f'Sending request: {repr(request)}')
-        self.session.open_service(request.service_name)
-        service = self.session.getService(request.service_name)
-        _request = request.create_request(service)
-        cid = self.session.sendRequest(_request)
+        try:
+            self.session.open_service(request.service_name)
+            service = self.session.getService(request.service_name)
+            _request = request.create_request(service)
+            cid = self.session.sendRequest(_request)
+        except blpapi.Exception as exc:
+            if 'Session Not Started' in str(exc) or type(exc).__name__ == 'InvalidStateException':
+                raise SessionNotAvailableError(str(exc)) from exc
+            raise
         request.prepare_response()
         return self._wait_for_response(request)
 
@@ -1154,6 +1159,8 @@ class Blp(metaclass=PostInitCaller):
                 case Event.SESSION_STATUS:
                     try:
                         request.on_admin_event(event)
+                    except SessionError:
+                        raise
                     except:
                         break
                 case _:
