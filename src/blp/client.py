@@ -301,8 +301,8 @@ class HistoricalDataRequest(BaseRequest):
         assert period in {'DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'SEMI_ANNUALLY', 'YEARLY'}
         self.is_single_ticker = is_single_ticker = isinstance(tickers, str)
         self.is_single_field = is_single_field = isinstance(fields, str)
-        self.tickers = [tickers] if is_single_ticker else list(tickers)
-        self.fields = [fields] if is_single_field else list(fields)
+        self.tickers = [str(tickers)] if is_single_ticker else [str(t) for t in tickers]
+        self.fields = [str(fields)] if is_single_field else [str(f) for f in fields]
         self.start, self.end = create_daterange(start, end)
         self.timezone = Timezone(timezone)
         self.parser = Parser(UTC, self.timezone)
@@ -443,8 +443,8 @@ class ReferenceDataRequest(BaseRequest):
         )
         self.is_single_ticker = is_single_ticker = isinstance(tickers, str)
         self.is_single_field = is_single_field = isinstance(fields, str)
-        self.tickers = [tickers] if isinstance(tickers, str) else tickers
-        self.fields = [fields] if isinstance(fields, str) else fields
+        self.tickers = [str(tickers)] if isinstance(tickers, str) else [str(t) for t in tickers]
+        self.fields = [str(fields)] if isinstance(fields, str) else [str(f) for f in fields]
         self.return_formatted_value = return_formatted_value
         self.timezone = Timezone(timezone)
         self.parser = Parser(
