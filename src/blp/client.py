@@ -1525,7 +1525,10 @@ class Subscription:
             raise
         finally:
             logger.info('Ending subscription...')
-            session.unsubscribe(subscriptions)
-            session.cleanup()
+            try:
+                session.unsubscribe(subscriptions)
+                session.cleanup()
+            except Exception as exc:
+                logger.warning(f'Could not end subscription cleanly: {exc}')
 
         return _handler
