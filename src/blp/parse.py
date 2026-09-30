@@ -2,14 +2,15 @@ import contextlib
 import datetime
 import json
 import logging
-from collections import defaultdict, namedtuple
+from collections import namedtuple
+from typing import Any
 
 import blpapi
 import numpy as np
 import pandas as pd
 from blpapi.datatype import DataType
-
 from opendate import LCL, UTC, Date, DateTime, Time, Timezone
+
 from libb import round_digit_string, underscore_to_camelcase
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ class Parser:
         desired_timezone: Timezone = LCL,
         decimal_places: int = None,
         time_as_datetime: bool = False,
-        include_ticker_field = False,
+        include_ticker_field=False,
         field_parse_custom: dict = {}
 
     ):
@@ -115,8 +116,28 @@ class Parser:
         """
         return [self.get_subelement_value(element, name, force_string) for name in names]
 
-    def element_as_value(self, element=None, force_string=False):
-        """Convert the specified element as a python value with timezone awareness.
+    def element_as_value(
+        self,
+        element: blpapi.Element = None,
+        force_string: bool = False
+    ) -> Any:
+        """Python value of a Bloomberg element, with timezone awareness.
+
+        Parameters
+        ----------
+        element : blpapi.Element
+            Element to read.
+        force_string : bool, default False
+            Return every value as a string, and a bulk field as JSON.
+            A value Bloomberg types as a number goes through
+            round_digit_string.
+
+        Returns
+        -------
+        Any
+            The element's value. A string type comes back as Bloomberg sent
+            it, with surrounding whitespace stripped, so a CUSIP keeps its
+            leading zeros.
         """
         dtype = element.datatype()
         if dtype == DataType.SEQUENCE:
@@ -127,7 +148,9 @@ class Parser:
         if force_string:
             if element.isNull():
                 return ''
-            return round_digit_string(element.getValueAsString(), self.decimal_places)
+            if dtype in NUMERIC_TYPES:
+                return round_digit_string(element.getValueAsString(), self.decimal_places)
+            return element.getValueAsString().strip()
         if dtype in NUMERIC_TYPES:
             if element.isNull():
                 return np.nan
@@ -161,7 +184,7 @@ class Parser:
             logger.warning('CHOICE data type needs implemented')
         if element.isNull():
             return ''
-        return round_digit_string(element.getValueAsString(), self.decimal_places)
+        return element.getValueAsString().strip()
 
     #
     # error getters
@@ -218,28 +241,53 @@ class Parser:
     # private methods
     #
 
-    def _sequence_as_dataframe(self, elements) -> pd.DataFrame:
-        """Convert an element with DataType Sequence to a DataFrame.
+    def _sequence_as_dataframe(self, elements: blpapi.Element) -> pd.DataFrame:
+        """One row per sequence entry, one column per subelement name.
+
+        Parameters
+        ----------
+        elements : blpapi.Element
+            Element of DataType SEQUENCE.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns in first-seen order across all rows. A row that omits
+            an optional field holds None there, which pandas stores as NaN
+            or NaT in a numeric or datetime column.
         """
-        data = defaultdict(list)
-        cols = []
-        for i, element in enumerate(elements.values()):
-            if i == 0:  # Get the ordered cols and assume they are constant
-                cols = [str(_.name()) for _ in element.elements()]
-            for subelement in element.elements():
-                data[str(subelement.name())].append(self.element_as_value(subelement))
+        rows = [
+            {str(subelement.name()): self.element_as_value(subelement)
+             for subelement in element.elements()}
+            for element in elements.values()
+            ]
+        cols = list(dict.fromkeys(name for row in rows for name in row))
+        data = {name: [row.get(name) for row in rows] for name in cols}
         if self.include_ticker_field:
             data['ticker'] = None
             data['field'] = None
         return pd.DataFrame(data, columns=cols)
 
-    def _sequence_as_json(self, elements) -> str:
-        """Convert an element with DataType Sequence to JSON string.
+    def _sequence_as_json(self, elements: blpapi.Element) -> str:
+        """JSON list of one {name: value} object per subelement.
+
+        Parameters
+        ----------
+        elements : blpapi.Element
+            Element of DataType SEQUENCE.
+
+        Returns
+        -------
+        str
+            JSON text, or '' for an empty sequence. Only a subelement
+            Bloomberg types as a number goes through round_digit_string.
         """
         data = []
         for element in elements.values():
             for subelement in element.elements():
-                d = {str(subelement.name()):
-                     round_digit_string(subelement.getValueAsString(), self.decimal_places)}
+                value = subelement.getValueAsString()
+                if subelement.datatype() in NUMERIC_TYPES:
+                    value = round_digit_string(value, self.decimal_places)
+                d = {str(subelement.name()): value.strip()}
                 data += [d]
         return json.dumps(data) if data else ''
