@@ -5,7 +5,7 @@ description = "Simple blpapi wrapper"
 authors = ["bissli <bissli@xyz.com>"]
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.10"
 
 blpapi = { version = "*", source = "blpapi" }
 
@@ -16,7 +16,7 @@ opendate = "*"
 
 pywin32 = { version = "*", markers = "sys_platform == 'win32'" }
 
-libb-util = "*"
+libb-util = ">=0.0.61"
 
 # == test
 asserts = { version = "*", optional = true }
