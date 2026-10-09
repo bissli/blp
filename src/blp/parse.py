@@ -41,6 +41,8 @@ NUMERIC_TYPES = (
     DataType.DECIMAL
 )
 
+CLOCK_SKEW_ALLOWANCE = datetime.timedelta(hours=1)
+
 
 class Parser:
     """Interpreter class for Bloomberg Events
@@ -165,15 +167,10 @@ class Parser:
                 return pd.NaT
             obj = element.getValue()
             if isinstance(obj, datetime.time):
-                # parsing datetime.time with no tzinfo
-                _date = Date.today()
-                _time = Time.instance(obj).replace(tzinfo=self.assumed_timezone)
-                _datetime = DateTime\
-                    .combine(_date, _time, self.assumed_timezone)\
-                    .in_timezone(self.desired_timezone)
+                dated = self._assign_date(obj).in_timezone(self.desired_timezone)
                 if self.time_as_datetime:
-                    return _datetime
-                return _datetime.time()
+                    return dated
+                return dated.time()
             if isinstance(obj, datetime.datetime):
                 # parsing datetime.datetime with no tzinfo
                 return DateTime\
@@ -185,6 +182,12 @@ class Parser:
         if element.isNull():
             return ''
         return element.getValueAsString().strip()
+
+    def _assign_date(self, time_of_day: datetime.time) -> DateTime:
+        """time_of_day in assumed_timezone on this machine's local date.
+        """
+        time_in_zone = Time.instance(time_of_day).replace(tzinfo=self.assumed_timezone)
+        return DateTime.combine(Date.today(), time_in_zone, self.assumed_timezone)
 
     #
     # error getters
@@ -291,3 +294,24 @@ class Parser:
                 d = {str(subelement.name()): value.strip()}
                 data += [d]
         return json.dumps(data) if data else ''
+
+
+class SubscriptionParser(Parser):
+    """Parser that dates a time-only value at its latest past occurrence.
+
+    A subscription sends a time with no date only as a last-update stamp.
+    A stamp up to CLOCK_SKEW_ALLOWANCE ahead of this machine's clock keeps
+    that instant. A stamp a day or more old still lands in the last day.
+    """
+
+    def _assign_date(self, time_of_day: datetime.time) -> DateTime:
+        """Latest instant of time_of_day up to CLOCK_SKEW_ALLOWANCE past now.
+        """
+        latest = DateTime.now(self.assumed_timezone) + CLOCK_SKEW_ALLOWANCE
+        time_in_zone = Time.instance(time_of_day).replace(tzinfo=self.assumed_timezone)
+        stamp = DateTime.combine(latest.date(), time_in_zone, self.assumed_timezone)
+        # Python compares same-zone datetimes by wall time, which is wrong
+        # across a fall-back change.
+        if stamp.in_timezone(UTC) > latest.in_timezone(UTC):
+            return stamp.subtract(days=1)
+        return stamp

@@ -1,11 +1,15 @@
+import datetime
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 from blpapi.datatype import DataType
+from dateutil.tz import gettz
+from opendate import UTC, Date, DateTime, Timezone
 
-from blp.parse import Parser
+from blp.handle import LoggingEventHandler
+from blp.parse import Parser, SubscriptionParser
 
 
 def make_element(dtype: int, text: str, name: str = 'VALUE') -> MagicMock:
@@ -31,6 +35,120 @@ def make_element(dtype: int, text: str, name: str = 'VALUE') -> MagicMock:
     element.getValueAsString.return_value = text
     element.name.return_value = name
     return element
+
+
+NEW_YORK = Timezone('America/New_York')
+SYDNEY = Timezone('Australia/Sydney')
+MORNING = DateTime(2026, 6, 16, 8, 44, tzinfo=NEW_YORK)
+FALL_BACK_MORNING = DateTime(2026, 11, 1, 8, 44, tzinfo=NEW_YORK)
+MIDDAY = DateTime(2026, 6, 16, 12, 0, tzinfo=NEW_YORK)
+LATE_EVENING = DateTime(2026, 6, 16, 22, 30, tzinfo=NEW_YORK)
+FALL_BACK_NIGHT = DateTime(2026, 11, 1, 1, 10, tzinfo=NEW_YORK)
+NEW_YORK_BEFORE_MIDNIGHT = DateTime(2026, 6, 16, 23, 30, tzinfo=NEW_YORK)
+UTC_BEFORE_MIDNIGHT = DateTime(2026, 6, 16, 23, 30, tzinfo=UTC)
+
+
+def parse_time_only(parser_class, stamp, now, assumed_timezone, as_datetime=True):
+    """element_as_value of stamp's time of day, with the clock stopped at now.
+
+    Parameters
+    ----------
+    parser_class : type[Parser]
+        Parser or SubscriptionParser.
+    stamp : DateTime
+        Its naive time of day in assumed_timezone is the element value.
+    now : DateTime
+        What DateTime.now returns, in the zone asked for.
+    assumed_timezone : Timezone
+        Parser assumed_timezone. desired_timezone is New York.
+    as_datetime : bool, default True
+        Parser time_as_datetime.
+
+    Returns
+    -------
+    DateTime or Time
+    """
+    element = make_element(DataType.DATETIME, '')
+    local_stamp = stamp.in_timezone(assumed_timezone)
+    element.getValue.return_value = local_stamp.time().replace(tzinfo=None)
+    parser = parser_class(
+        assumed_timezone=assumed_timezone,
+        desired_timezone=NEW_YORK,
+        time_as_datetime=as_datetime)
+    with patch('blp.parse.DateTime.now', side_effect=now.in_timezone):
+        return parser.element_as_value(element)
+
+
+@pytest.mark.parametrize('assumed_timezone', [
+    UTC,
+    NEW_YORK,
+    SYDNEY,
+    gettz('Australia/Sydney'),
+    ])
+@pytest.mark.parametrize(('now', 'stamp'), [
+    (MORNING, DateTime(2026, 6, 15, 21, 40, 51, tzinfo=NEW_YORK)),
+    (MORNING, DateTime(2026, 6, 16, 3, 41, 56, tzinfo=NEW_YORK)),
+    (MORNING, MORNING.add(minutes=59)),
+    (MORNING, MORNING.add(hours=1)),
+    (MORNING, MORNING.add(minutes=61).subtract(days=1)),
+    (FALL_BACK_MORNING, DateTime(2026, 10, 31, 21, 40, 51, tzinfo=NEW_YORK)),
+    (MIDDAY, MIDDAY.subtract(hours=1)),
+    (LATE_EVENING, DateTime(2026, 6, 16, 22, 0, tzinfo=NEW_YORK)),
+    (FALL_BACK_NIGHT, DateTime(2026, 11, 1, 1, 30, tzinfo=NEW_YORK)),
+    (NEW_YORK_BEFORE_MIDNIGHT, NEW_YORK_BEFORE_MIDNIGHT.add(minutes=40)),
+    (UTC_BEFORE_MIDNIGHT, UTC_BEFORE_MIDNIGHT.add(minutes=40)),
+    ])
+def test_subscription_time_only_at_latest_past_instant(now, stamp, assumed_timezone):
+    """Verify a subscription dates a time-only value at its latest past instant.
+
+    Mutation: now's date, or the UTC date, for the date of now plus the
+        allowance, the previous-day step dropped, >= for >, a wall-time
+        comparison, subtract(hours=24) for subtract(days=1), another
+        allowance, or opendate before 0.1.50, which reads a dateutil zone
+        as UTC.
+    Oracle: hand-picked instants either side of and at one hour ahead of
+        now, fed in as their time of day in assumed_timezone.
+    """
+    result = parse_time_only(SubscriptionParser, stamp, now, assumed_timezone)
+    assert result.isoformat() == stamp.in_timezone(NEW_YORK).isoformat()
+
+
+@pytest.mark.parametrize(('now', 'stamp', 'assumed_timezone'), [
+    (LATE_EVENING, DateTime(2026, 6, 16, 23, 59, 58, tzinfo=UTC), UTC),
+    (MORNING, DateTime(2026, 6, 16, 21, 40, 51, tzinfo=NEW_YORK), NEW_YORK),
+    ])
+def test_request_time_only_takes_machine_date(now, stamp, assumed_timezone):
+    """Verify Parser dates a time-only value with the machine's date.
+
+    Mutation: today in assumed_timezone for Date.today(), which dates the
+        UTC stamp a day ahead, or the subscription rule, which dates the
+        21:40:51 stamp a day early.
+    Oracle: a New York machine sees 2026-06-16 at both instants.
+    """
+    with patch('blp.parse.Date.today', return_value=Date(2026, 6, 16)):
+        result = parse_time_only(Parser, stamp, now, assumed_timezone)
+    assert result.isoformat() == stamp.in_timezone(NEW_YORK).isoformat()
+
+
+def test_time_only_as_time_in_desired_timezone():
+    """Verify time_as_datetime=False returns the time in desired_timezone.
+
+    Mutation: the in_timezone conversion dropped, which returns 01:40:51.
+    Oracle: 2026-11-01 01:40:51Z is 2026-10-31 21:40:51 EDT.
+    """
+    stamp = DateTime(2026, 10, 31, 21, 40, 51, tzinfo=NEW_YORK)
+    result = parse_time_only(SubscriptionParser, stamp, FALL_BACK_MORNING, UTC, False)
+    assert result.replace(tzinfo=None) == datetime.time(21, 40, 51)
+
+
+def test_event_handler_parses_with_subscription_parser():
+    """Verify a subscription handler parses with SubscriptionParser.
+
+    Mutation: BaseEventHandler builds a plain Parser.
+    Oracle: the class of the handler's parser.
+    """
+    handler = LoggingEventHandler(['IBM US Equity'], ['TIME'])
+    assert type(handler.parser) is SubscriptionParser
 
 
 @pytest.mark.parametrize('force_string', [True, False])

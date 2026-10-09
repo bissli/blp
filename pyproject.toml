@@ -12,7 +12,7 @@ blpapi = { version = "*", source = "blpapi" }
 pandas = "*"
 pyarrow = "*"
 numpy = "*"
-opendate = "*"
+opendate = ">=0.1.50"
 
 pywin32 = { version = "*", markers = "sys_platform == 'win32'" }
 

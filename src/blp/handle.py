@@ -10,9 +10,9 @@ import blpapi
 import numpy as np
 import pandas as pd
 from blpapi.event import Event
-
-from blp.parse import Name, Parser
 from opendate import LCL
+
+from blp.parse import Name, SubscriptionParser
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class BaseEventHandler(ABC):
         desired_timezone = kwargs.pop('desired_timezone', LCL)
         time_as_datetime = kwargs.pop('time_as_datetime', False)
 
-        self.parser = Parser(
+        self.parser = SubscriptionParser(
             assumed_timezone=assumed_timezone,
             desired_timezone=desired_timezone,
             time_as_datetime=time_as_datetime,
@@ -71,7 +71,7 @@ class BaseEventHandler(ABC):
             match message.messageType():
                 case Name.SUBSCRIPTION_FAILURE:
                     desc = message.getElement('reason').getElementAsString('description')
-                    raise Exception(f'Subscription failed topic={topic} desc={desc}')
+                    logger.error(f'Subscription failed topic={topic} desc={desc}')
                 case Name.SUBSCRIPTION_TERMINATED:
                     # subscription can be terminated if the session identity is revoked.
                     logger.error(f'Subscription for {topic} TERMINATED')
@@ -98,27 +98,27 @@ class BaseEventHandler(ABC):
                 case Name.SLOW_CONSUMER_WARNING:
                     logger.warning(
                         f'{Name.SLOW_CONSUMER_WARNING} - The event queue is '
-                        + 'beginning to approach its maximum capacity and '
-                        + 'the application is not processing the data fast '
-                        + 'enough. This could lead to ticks being dropped'
-                        + ' (DataLoss).\n'
+                        'beginning to approach its maximum capacity and '
+                        'the application is not processing the data fast '
+                        'enough. This could lead to ticks being dropped'
+                        ' (DataLoss).\n'
                     )
                 case Name.SLOW_CONSUMER_WARNING_CLEARED:
                     logger.warning(
                         f'{Name.SLOW_CONSUMER_WARNING_CLEARED} - the event '
-                        + 'queue has shrunk enough that there is no '
-                        + 'longer any immediate danger of overflowing the '
-                        + 'queue. If any precautionary actions were taken '
-                        + 'when SlowConsumerWarning message was delivered, '
-                        + 'it is now safe to continue as normal.\n'
+                        'queue has shrunk enough that there is no '
+                        'longer any immediate danger of overflowing the '
+                        'queue. If any precautionary actions were taken '
+                        'when SlowConsumerWarning message was delivered, '
+                        'it is now safe to continue as normal.\n'
                     )
                 case Name.DATA_LOSS:
                     logger.warning(message)
                     topic = message.correlationId().value()
                     logger.warning(
                         f'{Name.DATA_LOSS} - The application is too slow to '
-                        + 'process events and the event queue is overflowing. '
-                        + f'Data is lost for topic {topic}.\n'
+                        'process events and the event queue is overflowing. '
+                        f'Data is lost for topic {topic}.\n'
                     )
                 case Name.SESSION_TERMINATED:
                     # SESSION_STATUS events can happen at any time and
