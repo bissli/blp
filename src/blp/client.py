@@ -14,11 +14,11 @@ from collections import defaultdict
 import blpapi
 import pandas as pd
 from blpapi.event import Event
+from opendate import LCL, UTC, DateTime, Timezone
 
 from blp.handle import BaseEventHandler, DefaultEventHandler
 from blp.parse import Name, Parser
-from opendate import LCL, UTC, DateTime, Timezone
-from libb import NonBlockingDelay, is_null
+from libb import is_null
 
 try:
     import win32api
@@ -1145,7 +1145,7 @@ class Blp(metaclass=PostInitCaller):
         Failures will be delivered in a REQUEST_STATUS event
         holding a REQUEST_FAILURE message.
         """
-        while 1:
+        while True:
             event = self.session.nextEvent(500)  # timeout to gtive the chance to ctrl+c handling
             match event.eventType():
                 case Event.RESPONSE:
@@ -1507,18 +1507,14 @@ class Subscription:
             logger.info('Starting subscription...')
             session.subscribe(subscriptions)
 
-            if shutdown_event:
-                start_time = time.time()
-                while time.time() - start_time < runtime:
-                    if shutdown_event.is_set():
-                        logger.info('Shutdown event detected, ending subscription')
-                        break
-                    shutdown_event.wait(timeout=1.0)
-            else:
-                delay = NonBlockingDelay()
-                delay.delay(runtime)
-                while not delay.timeout():
-                    continue
+            shutdown_event = shutdown_event or threading.Event()
+            deadline = time.monotonic() + float(runtime)
+            while (remaining := deadline - time.monotonic()) > 0:
+                # The one-second cap keeps Ctrl-C working on Windows, where
+                # a lock wait ignores it.
+                if shutdown_event.wait(timeout=min(remaining, 1.0)):
+                    logger.info('Shutdown event detected, ending subscription')
+                    break
         except blpapi.Exception as exc:
             if 'Session Not Started' in str(exc) or type(exc).__name__ == 'InvalidStateException':
                 raise SessionNotAvailableError(str(exc)) from exc
