@@ -55,6 +55,7 @@ __all__ = [
     'BQLResponse',
     # Subscription
     'Subscription',
+    'SubscriptionDeadError',
 ]
 
 
@@ -109,6 +110,11 @@ class SessionTerminatedError(SessionError):
 
 class SessionNotAvailableError(SessionError):
     """No usable Bloomberg session on this host (e.g. terminal not logged in)."""
+
+
+class SubscriptionDeadError(SessionError):
+    """A running subscription can no longer deliver data.
+    """
 
 
 class BaseRequest(ABC):
@@ -1491,6 +1497,13 @@ class Subscription:
         BaseEventHandler
             The handler, holding what it collected.
 
+        Raises
+        ------
+        SubscriptionDeadError
+            The session terminated, every topic failed or was terminated,
+            or no data arrived for any topic within 60 s of subscribing.
+            Data that stops later in the run never raises.
+
         Notes
         -----
         - Bloomberg sends subscription times in the terminal's time zone.
@@ -1516,15 +1529,20 @@ class Subscription:
         try:
             logger.info('Starting subscription...')
             session.subscribe(subscriptions)
+            subscribed_at = time.monotonic()
 
             shutdown_event = shutdown_event or threading.Event()
-            deadline = time.monotonic() + float(runtime)
+            deadline = subscribed_at + float(runtime)
             while (remaining := deadline - time.monotonic()) > 0:
                 # The one-second cap keeps Ctrl-C working on Windows, where
                 # a lock wait ignores it.
                 if shutdown_event.wait(timeout=min(remaining, 1.0)):
                     logger.info('Shutdown event detected, ending subscription')
                     break
+                if _handler.failure:
+                    raise SubscriptionDeadError(_handler.failure)
+                if not _handler.first_data and time.monotonic() - subscribed_at >= 60:
+                    raise SubscriptionDeadError('no subscription data within 60 s')
         except blpapi.Exception as exc:
             if 'Session Not Started' in str(exc) or type(exc).__name__ == 'InvalidStateException':
                 raise SessionNotAvailableError(str(exc)) from exc
