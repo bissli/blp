@@ -39,6 +39,7 @@ __all__ = [
     'SessionStartError',
     'SessionTerminatedError',
     'SessionNotAvailableError',
+    'RequestTimeoutError',
     # Requests
     'HistoricalDataRequest',
     'ReferenceDataRequest',
@@ -115,6 +116,16 @@ class SessionNotAvailableError(SessionError):
 class SubscriptionDeadError(SessionError):
     """A running subscription can no longer deliver data.
     """
+
+
+class RequestTimeoutError(SessionError):
+    """A request got no data from Bloomberg for REQUEST_IDLE_SECONDS.
+    """
+
+
+REQUEST_IDLE_SECONDS = 120
+SESSION_FAILURE_CATEGORIES = {'CONNECTION_DEAD', 'SERVICE_NOT_AVAILABLE'}
+REQUEST_EVENT_TYPES = {Event.RESPONSE, Event.PARTIAL_RESPONSE, Event.REQUEST_STATUS}
 
 
 class BaseRequest(ABC):
@@ -967,8 +978,10 @@ class Session(blpapi.Session):
             raise SessionStartError(f'Failed to open service {service_name}.')
 
     def cleanup(self) -> None:
-        """Cleanup and destroy session resources.
+        """Stop and destroy the session, and drop its exit hook so the
+        session can be garbage collected. Never raises.
         """
+        atexit.unregister(self.cleanup)
         with contextlib.suppress(Exception):
             self.stop()
             self.destroy()
@@ -1025,24 +1038,32 @@ class SessionFactory:
         event_handler=None,
         event_dispatcher=None,
     ) -> Session:
-        """Create Bloomberg API Session.
+        """Started Bloomberg API session.
 
         Parameters
         ----------
-        host : Not tested for BPIPE.
-        port : Not tested for BPIPE.
-        auth : Not tested for BPIPE.
-        event_handler : Needed only for subscriptions.
-        event_dispatcher : Needed only for subscriptions.
+        host : str, default 'localhost'
+            BBComm host. BPIPE hosts are outside the tested scope.
+        port : int, default 8194
+            BBComm port.
+        auth : str, default 'AuthenticationType=OS_LOGON'
+            blpapi authentication options string.
+        application_identity_key : str, optional
+            None sets no application identity.
+        event_handler : callable, optional
+            Called with (event, session). Setting it makes the session
+            asynchronous, as subscriptions need.
+        event_dispatcher : blpapi.EventDispatcher, optional
+            None uses blpapi's own single-thread dispatch.
 
         Returns
         -------
-        blpapi.Session object.
+        Session
 
         Raises
         ------
-        Exception : Exception on fail to start session.
-
+        SessionCreateError
+            The session failed to start. It is cleaned up first.
         """
         logger.info('Connecting to Bloomberg BBComm session...')
         session = create_session(
@@ -1054,6 +1075,7 @@ class SessionFactory:
             application_identity_key=application_identity_key
         )
         if not session.start():
+            session.cleanup()
             raise SessionCreateError('Failed to start session.')
         try:
             envuser = win32api.GetUserNameEx(win32con.NameSamCompatible)
@@ -1089,6 +1111,7 @@ class Blp(metaclass=PostInitCaller):
         self.auth = auth
         self.application_identity_key = application_identity_key
         self.skip_test = skip_test
+        self._owns_session = session is None
         self.session = session or SessionFactory.create(
             host=host,
             port=port,
@@ -1103,8 +1126,12 @@ class Blp(metaclass=PostInitCaller):
             logger.info('Running session connectivity test...')
             resp = self.get_reference_data(flds=['ID_BB_GLOBAL'], tickers=['IBM US Equity'])
             assert resp.as_dict()
-        except:
-            raise SessionError('Connectivity test failed.')
+        except Exception as exc:
+            # A caller's session crashes the process if used after
+            # cleanup.
+            if self._owns_session:
+                self.session.cleanup()
+            raise SessionError('Connectivity test failed.') from exc
 
     def __enter__(self):
         return self
@@ -1128,32 +1155,85 @@ class Blp(metaclass=PostInitCaller):
         return '<{clz}({host}:{port}:{auth})'.format(**fmtargs)
 
     def execute(self, request: BaseRequest) -> BaseResponse:
-        """Execute a Bloomberg API request and return the response.
+        """Send a Bloomberg API request and wait for its full response.
+
+        Parameters
+        ----------
+        request : BaseRequest
+            The request to send. It collects the response as it arrives.
+
+        Returns
+        -------
+        BaseResponse
+            The response the request built.
+
+        Raises
+        ------
+        RequestTimeoutError
+            Bloomberg sent nothing for the request for REQUEST_IDLE_SECONDS.
+            Each partial response restarts the count.
+        SessionNotAvailableError
+            The session is not started, or Bloomberg failed the request
+            with a category in SESSION_FAILURE_CATEGORIES.
+        SessionTerminatedError
+            The session terminated while waiting.
+        RuntimeError
+            Bloomberg failed the request for any other reason, such as bad
+            arguments. Unlike the errors above, it is not a SessionError.
         """
         logger.info(f'Sending request: {repr(request)}')
         try:
             self.session.open_service(request.service_name)
             service = self.session.getService(request.service_name)
             _request = request.create_request(service)
-            self.session.sendRequest(_request)
+            correlation_id = self.session.sendRequest(_request)
         except blpapi.Exception as exc:
             if 'Session Not Started' in str(exc) or type(exc).__name__ == 'InvalidStateException':
                 raise SessionNotAvailableError(str(exc)) from exc
             raise
         request.prepare_response()
-        return self._wait_for_response(request)
+        return self._wait_for_response(request, correlation_id)
 
-    def _wait_for_response(self, request: BaseRequest) -> BaseResponse:
-        """Wait for response after sending request, handling partial and final events.
+    def _wait_for_response(
+        self,
+        request: BaseRequest,
+        correlation_id: blpapi.CorrelationId) -> BaseResponse:
+        """Feed request the events for correlation_id until its RESPONSE.
 
-        Success response can come with a number of
-        PARTIAL_RESPONSE events followed by a RESPONSE event.
-        Failures will be delivered in a REQUEST_STATUS event
-        holding a REQUEST_FAILURE message.
+        Parameters
+        ----------
+        request : BaseRequest
+            The request that processes each response event.
+        correlation_id : blpapi.CorrelationId
+            The id sendRequest returned. Response and request status events
+            for any other id belong to an abandoned request and are skipped.
+
+        Returns
+        -------
+        BaseResponse
+            The response the request built.
+
+        Raises
+        ------
+        RequestTimeoutError
+        SessionNotAvailableError
+        SessionTerminatedError
+        RuntimeError
+            As listed in execute.
         """
+        deadline = time.monotonic() + REQUEST_IDLE_SECONDS
         while True:
-            event = self.session.nextEvent(500)  # timeout to gtive the chance to ctrl+c handling
-            match event.eventType():
+            if time.monotonic() > deadline:
+                raise RequestTimeoutError(
+                    f'No data for {request!r} within {REQUEST_IDLE_SECONDS} s')
+            # A short wait keeps Ctrl-C and the deadline check responsive.
+            event = self.session.nextEvent(500)
+            event_type = event.eventType()
+            if (event_type in REQUEST_EVENT_TYPES
+                and not any(correlation_id in msg.correlationIds() for msg in event)):
+                logger.debug(f'Skipped event type {event_type} of an abandoned request')
+                continue
+            match event_type:
                 case Event.RESPONSE:
                     logger.debug('Processing RESPONSE ...')
                     request.process_response(event, is_final=True)
@@ -1162,16 +1242,22 @@ class Blp(metaclass=PostInitCaller):
                 case Event.PARTIAL_RESPONSE:
                     logger.debug('Processing PARTIAL_RESPONSE ...')
                     request.process_response(event, is_final=False)
+                    deadline = time.monotonic() + REQUEST_IDLE_SECONDS
+                case Event.REQUEST_STATUS:
+                    message = next(
+                        msg for msg in event if correlation_id in msg.correlationIds())
+                    category = ''
+                    if message.hasElement('reason'):
+                        reason = message.getElement('reason')
+                        if reason.hasElement('category'):
+                            category = reason.getElementAsString('category')
+                    if category in SESSION_FAILURE_CATEGORIES:
+                        raise SessionNotAvailableError(f'Request failed: {message}')
+                    raise RuntimeError(f'Request failed: {message}')
                 case Event.SESSION_STATUS:
-                    try:
-                        request.on_admin_event(event)
-                    except SessionError:
-                        raise
-                    except:
-                        break
-                case _:
-                    pass
-        request.has_exception and request.raise_exception()
+                    request.on_admin_event(event)
+        if request.has_exception:
+            request.raise_exception()
         return request.response
 
     def get_historical(
@@ -1519,14 +1605,13 @@ class Subscription:
             event_dispatcher=self.dispatcher,
             application_identity_key=self.application_identity_key,
         )
-        session.open_service('//blp/mktdata')
-
         subscriptions = blpapi.SubscriptionList()
         options = {'interval': f'{self.interval:.1f}'} if self.interval else {}
         for topic in self.topics:
             subscriptions.add(topic, self.fields, options, blpapi.CorrelationId(topic))
 
         try:
+            session.open_service('//blp/mktdata')
             logger.info('Starting subscription...')
             session.subscribe(subscriptions)
             subscribed_at = time.monotonic()
@@ -1551,8 +1636,8 @@ class Subscription:
             logger.info('Ending subscription...')
             try:
                 session.unsubscribe(subscriptions)
-                session.cleanup()
             except Exception as exc:
                 logger.warning(f'Could not end subscription cleanly: {exc}')
+            session.cleanup()
 
         return _handler

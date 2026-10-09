@@ -218,3 +218,29 @@ def test_shutdown_event_returns_normally():
     shutdown = FakeShutdown([], stop_at=5)
     run_subscription(shutdown)
     assert shutdown.now == 5
+
+
+def test_failed_unsubscribe_still_cleans_up():
+    """Verify the session is cleaned up when unsubscribe raises, as it does
+    on a session that has terminated.
+
+    Mutation: cleanup back inside the unsubscribe try.
+    Oracle: a mock session whose unsubscribe raises; cleanup is recorded.
+    """
+    session = MagicMock()
+    session.unsubscribe.side_effect = RuntimeError('Session Not Started')
+    run_subscription(FakeShutdown([], stop_at=5), session)
+    session.cleanup.assert_called_once()
+
+
+def test_failed_open_service_still_cleans_up():
+    """Verify the session is cleaned up when opening //blp/mktdata fails.
+
+    Mutation: open_service moved back above the try.
+    Oracle: a mock session whose open_service raises; cleanup is recorded.
+    """
+    session = MagicMock()
+    session.open_service.side_effect = blp.client.SessionStartError('no service')
+    with pytest.raises(blp.client.SessionStartError):
+        run_subscription(FakeShutdown([]), session)
+    session.cleanup.assert_called_once()
