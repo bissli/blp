@@ -58,7 +58,7 @@ class Parser:
         decimal_places: int = None,
         time_as_datetime: bool = False,
         include_ticker_field=False,
-        field_parse_custom: dict = {}
+        field_parse_custom: dict | None = None
 
     ):
         self.assumed_timezone = assumed_timezone or UTC
@@ -160,7 +160,6 @@ class Parser:
         if dtype == DataType.DATE:
             if element.isNull():
                 return pd.NaT
-            # parsing a datetime.date object
             return Date.instance(element.getValue())
         if dtype in {DataType.DATETIME, DataType.TIME}:
             if element.isNull():
@@ -172,7 +171,6 @@ class Parser:
                     return dated
                 return dated.time()
             if isinstance(obj, datetime.datetime):
-                # parsing datetime.datetime with no tzinfo
                 return DateTime\
                     .instance(obj)\
                     .replace(tzinfo=self.assumed_timezone)\

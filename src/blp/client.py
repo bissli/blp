@@ -427,7 +427,7 @@ class ReferenceDataRequest(BaseRequest):
         raise_field_error=False,
         decimal_places: int = None,
         return_formatted_value=None,
-        field_parse_custom: dict = {},
+        field_parse_custom: dict | None = None,
         timezone: str = LCL.name,
         force_string=False,
         time_as_datetime=False,
@@ -441,8 +441,8 @@ class ReferenceDataRequest(BaseRequest):
             raise_field_error=raise_field_error,
             force_string=force_string,
         )
-        self.is_single_ticker = is_single_ticker = isinstance(tickers, str)
-        self.is_single_field = is_single_field = isinstance(fields, str)
+        self.is_single_ticker = isinstance(tickers, str)
+        self.is_single_field = isinstance(fields, str)
         self.tickers = [str(tickers)] if isinstance(tickers, str) else [str(t) for t in tickers]
         self.fields = [str(fields)] if isinstance(fields, str) else [str(f) for f in fields]
         self.return_formatted_value = return_formatted_value
@@ -1129,7 +1129,7 @@ class Blp(metaclass=PostInitCaller):
             self.session.open_service(request.service_name)
             service = self.session.getService(request.service_name)
             _request = request.create_request(service)
-            cid = self.session.sendRequest(_request)
+            self.session.sendRequest(_request)
         except blpapi.Exception as exc:
             if 'Session Not Started' in str(exc) or type(exc).__name__ == 'InvalidStateException':
                 raise SessionNotAvailableError(str(exc)) from exc
@@ -1216,7 +1216,7 @@ class Blp(metaclass=PostInitCaller):
         flds,
         timezone: str = LCL.name,
         decimal_places: int = None,
-        field_parse_custom: dict = {},
+        field_parse_custom: dict | None = None,
         raise_security_error=False,
         raise_field_error=False,
         include_ticker_field=False,
@@ -1440,19 +1440,21 @@ class Subscription:
         application_identity_key=None,
         dispatcher=None,
     ):
-        """
+        """Store the topics, fields and session settings.
 
         Parameters
         ----------
-        topics :  (tickers, but also custom Bloomberg mnemonics IE @MSG1). IE ['IBM US Equity', 'TSLA US Equity' ]
-        fields :  IE `['BID', 'ASK', 'TRADE']`
-        interval :  Time in seconds to intervalize the subscriptions
-        host : For session creation. See SessionFactory.
-        port : For session creation. See SessionFactory.
-        auth : For session creation. See SessionFactory.
-        auth : For session creation. See SessionFactory.
-        dispatcher :  if None, will create a defualt Dispatcher (single thread)
-
+        topics : str or list[str]
+            Securities such as 'IBM US Equity', or custom Bloomberg
+            mnemonics such as @MSG1 topics.
+        fields : str or list[str]
+            Fields whose changes raise an event, such as ['BID', 'ASK'].
+        interval : float, default 0
+            Seconds between conflated updates. 0 leaves it unset.
+        host, port, auth, application_identity_key
+            Session settings, passed to SessionFactory.create.
+        dispatcher : blpapi.EventDispatcher, optional
+            None uses blpapi's own single-thread dispatch.
         """
         self.fields = [fields] if isinstance(fields, str) else fields
         self.topics = [topics] if isinstance(topics, str) else topics
@@ -1470,22 +1472,30 @@ class Subscription:
         shutdown_event: threading.Event = None,
         **kwargs
     ) -> BaseEventHandler:
-        r"""Subscribe with a given handler and return handler instance.
+        """Run the subscription for runtime seconds and return the handler.
 
         Parameters
         ----------
-        handler : Async handler instance of BaseHandler. Expects class, not object instance
-        runtime : Duration to run service in seconds. Generally best to run between 0 and time to market close..
+        handler : type[BaseEventHandler]
+            Handler class. It is built here from topics, fields and kwargs.
+        runtime : float, default 86400
+            Seconds to run. 0 or less unsubscribes at once.
+        shutdown_event : threading.Event, optional
+            Setting it ends the subscription early.
+        **kwargs
+            Passed to the handler: assumed_timezone, desired_timezone and
+            time_as_datetime.
 
-        Form of created subscription string (subscriptions.add):
+        Returns
+        -------
+        BaseEventHandler
+            The handler, holding what it collected.
 
-        "//blp/mktdata/ticker/IBM US Equity?fields=BID,ASK&interval=2"
-        \\-----------/\\------/\\-----------/\\------------------------/
-        |          |         |                  |
-        Service    Prefix   Instrument           Suffix
-
-        All subscription date/times results are in the default timezone of the terminal.
-
+        Notes
+        -----
+        - Bloomberg sends subscription times in the terminal's time zone.
+          The handler assumes this machine's zone unless assumed_timezone
+          says otherwise.
         """
         _handler = handler(self.topics, self.fields, **kwargs)
         session = SessionFactory.create(
