@@ -14,10 +14,10 @@ from collections import defaultdict
 import blpapi
 import pandas as pd
 from blpapi.event import Event
-from opendate import LCL, UTC, DateTime, Timezone
+from opendate import LCL, UTC, Date, DateTime, Timezone
 
 from blp.handle import BaseEventHandler, DefaultEventHandler
-from blp.parse import Name, Parser
+from blp.parse import Name, Parser, ResponseError
 from libb import is_null
 
 try:
@@ -40,6 +40,9 @@ __all__ = [
     'SessionTerminatedError',
     'SessionNotAvailableError',
     'RequestTimeoutError',
+    'RequestSecurityError',
+    'RequestFieldError',
+    'ResponseError',
     # Requests
     'HistoricalDataRequest',
     'ReferenceDataRequest',
@@ -60,18 +63,34 @@ __all__ = [
 ]
 
 
-def create_daterange(beg: datetime.datetime, end: datetime.datetime) -> tuple[DateTime]:
-    """Create UTC dates for querying range requests.
+def create_daterange(
+    beg: datetime.date | str | None,
+    end: datetime.date | str | None) -> tuple[DateTime, DateTime]:
+    """UTC start and end instants for an intraday range request.
 
+    Parameters
+    ----------
+    beg : datetime.date, str or None
+        Range start. A naive date, datetime or string is read as UTC.
+        None means one day before end.
+    end : datetime.date, str or None
+        Range end, read as beg is. None means now.
+
+    Returns
+    -------
+    tuple[DateTime, DateTime]
+        (beg, end) in UTC.
+
+    Examples
+    --------
     >>> import datetime
     >>> beg, end = datetime.datetime(2024, 1, 1), datetime.datetime(2024, 1, 2)
     >>> create_daterange(beg, end)
-    (DateTime(2024, 1, 1, 5, 0, 0, tzinfo=Timezone('UTC')), DateTime(2024, 1, 2, 5, 0, 0, tzinfo=Timezone('UTC')))
+    (DateTime(2024, 1, 1, 0, 0, 0, tzinfo=Timezone('UTC')), DateTime(2024, 1, 2, 0, 0, 0, tzinfo=Timezone('UTC')))
 
-    >>> import datetime
     >>> beg, end = datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)
     >>> create_daterange(beg, end)
-    (DateTime(2024, 1, 1, 5, 0, 0, tzinfo=Timezone('UTC')), DateTime(2024, 1, 2, 5, 0, 0, tzinfo=Timezone('UTC')))
+    (DateTime(2024, 1, 1, 0, 0, 0, tzinfo=Timezone('UTC')), DateTime(2024, 1, 2, 0, 0, 0, tzinfo=Timezone('UTC')))
 
     >>> beg, end = '1975-05-21T22:00:00-04:00', '1975-05-22T22:00:00-04:00'
     >>> create_daterange(beg, end)
@@ -91,6 +110,33 @@ def create_daterange(beg: datetime.datetime, end: datetime.datetime) -> tuple[Da
     else:
         beg = DateTime.parse(beg).in_timezone(UTC)
     return beg, end
+
+
+def calendar_date(value: datetime.date | str) -> Date:
+    """The calendar date value names in its own timezone.
+
+    Parameters
+    ----------
+    value : datetime.date or str
+        A date, a datetime or pandas Timestamp, naive or aware, or a string
+        Date.parse reads. An offset in the value never shifts the date, so
+        '2024-01-02T20:00-05:00' is 2024-01-02.
+
+    Returns
+    -------
+    Date
+
+    Raises
+    ------
+    ValueError
+        Date.parse cannot read the string.
+    """
+    if isinstance(value, datetime.date):
+        return Date.instance(value)
+    date = Date.parse(value)
+    if date is None:
+        raise ValueError(f'No date in {value!r}')
+    return date
 
 
 class SessionError(RuntimeError):
@@ -120,6 +166,16 @@ class SubscriptionDeadError(SessionError):
 
 class RequestTimeoutError(SessionError):
     """A request got no data from Bloomberg for REQUEST_IDLE_SECONDS.
+    """
+
+
+class RequestSecurityError(Exception):
+    """A request set to raise on a securityError received one.
+    """
+
+
+class RequestFieldError(Exception):
+    """A request set to raise on a fieldExceptions entry received one.
     """
 
 
@@ -159,17 +215,25 @@ class BaseRequest(ABC):
             or (self.raise_field_error and self.field_errors)
 
     def raise_exception(self) -> None:
-        """Raise or log exceptions based on error configuration.
+        """Raise the collected errors the request is set to raise; log the rest.
+
+        Raises
+        ------
+        RequestSecurityError
+            raise_security_error is set and a security error was collected.
+            Checked before field errors.
+        RequestFieldError
+            raise_field_error is set and a field error was collected.
         """
         if self.security_errors:
             msgs = ''.join([str(s) for s in self.security_errors])
             if self.raise_security_error:
-                raise Exception(msgs)
+                raise RequestSecurityError(msgs)
             logger.debug(f'Security Errors:\n{msgs}')
         if self.field_errors:
             msgs = ''.join([str(s) for s in self.field_errors])
             if self.raise_field_error:
-                raise Exception(msgs)
+                raise RequestFieldError(msgs)
             logger.debug(f'Field Errors:\n{msgs}')
 
     @abstractmethod
@@ -259,28 +323,53 @@ class HistoricalDataResponse(BaseResponse):
 
 
 class HistoricalDataRequest(BaseRequest):
-    """"
-    Manages the creation and processing of Bloomberg HistoricalDataRequest.
+    """Bloomberg HistoricalDataRequest (BDH).
 
     Parameters
     ----------
-    tickers: Bloomberg security identifier(s).
-    fields: Bloomberg field name(s).
-    start: Optional. Date or date string. Defaults to 1 year ago if None.
-    end: Optional. Date or date string. Defaults to today if None.
-    period: Optional. Periodicity of data (DAILY, WEEKLY, MONTHLY, QUARTERLY,
-      SEMI_ANNUALLY, YEARLY).
-    raise_security_error: If True, raises exceptions for invalid tickers.
-    raise_field_error: If True, raises exceptions for invalid fields.
-    period_adjustment: Frequency and calendar type of the output (ACTUAL,
-      CALENDAR, FISCAL).
-    currency: ISO Code. Converts value from local to specified currency.
-    override_option: OVERRIDE_OPTION_CLOSE or OVERRIDE_OPTION_GPA.
-    pricing_option: PRICING_OPTION_PRICE or PRICING_OPTION_YIELD.
-    non_trading_day_fill_option: NON_TRADING_WEEKDAYS, ALL_CALENDAR_DAYS, or
-      ACTIVE_DAYS_ONLY.
-    non_trading_day_fill_method: PREVIOUS_VALUE or NIL_VALUE.
-    calendar_code_override: 2-letter country ISO code.
+    tickers : str or list[str]
+        Bloomberg security identifier(s).
+    fields : str or list[str]
+        Bloomberg field name(s).
+    start : datetime.date, str or None
+        First date, as calendar_date reads it: an offset in the value never
+        shifts the date. None means the day before end.
+    end : datetime.date, str or None
+        Last date, read as start is. None means this host's date today.
+    timezone : str
+        Zone for datetime values in the response. The request dates ignore
+        it.
+    period : str, optional
+        DAILY (the default), WEEKLY, MONTHLY, QUARTERLY, SEMI_ANNUALLY or
+        YEARLY.
+    raise_security_error : bool, default False
+        Raise RequestSecurityError for an invalid ticker.
+    raise_field_error : bool, default False
+        Raise RequestFieldError for an invalid field.
+    force_string : bool, default False
+        Return every value as a string.
+    period_adjustment : str, optional
+        ACTUAL, CALENDAR or FISCAL.
+    currency : str, optional
+        ISO code to convert values into.
+    override_option : str, optional
+        OVERRIDE_OPTION_CLOSE or OVERRIDE_OPTION_GPA.
+    pricing_option : str, optional
+        PRICING_OPTION_PRICE or PRICING_OPTION_YIELD.
+    non_trading_day_fill_option : str, optional
+        NON_TRADING_WEEKDAYS, ALL_CALENDAR_DAYS or ACTIVE_DAYS_ONLY.
+    non_trading_day_fill_method : str, optional
+        PREVIOUS_VALUE or NIL_VALUE.
+    max_data_points : int, optional
+        Cap on points per security, counted back from end.
+    adjustment_normal, adjustment_abnormal, adjustment_split : bool, optional
+        Bloomberg pricing adjustment flags.
+    adjustment_follow_DPDF : bool, optional
+        Follow the terminal's DPDF adjustment settings.
+    calendar_code_override : str, optional
+        Two-letter country ISO code.
+    **overrides
+        Bloomberg field overrides, field id to value.
     """
 
     def __init__(
@@ -320,7 +409,8 @@ class HistoricalDataRequest(BaseRequest):
         self.is_single_field = is_single_field = isinstance(fields, str)
         self.tickers = [str(tickers)] if is_single_ticker else [str(t) for t in tickers]
         self.fields = [str(fields)] if is_single_field else [str(f) for f in fields]
-        self.start, self.end = create_daterange(start, end)
+        self.end = Date.today() if is_null(end) else calendar_date(end)
+        self.start = self.end.subtract(days=1) if is_null(start) else calendar_date(start)
         self.timezone = Timezone(timezone)
         self.parser = Parser(UTC, self.timezone)
         self.period = period
@@ -343,8 +433,8 @@ class HistoricalDataRequest(BaseRequest):
             'clz': self.__class__.__name__,
             'symbols': ','.join(self.tickers),
             'fields': ','.join(self.fields),
-            'start': self.start.in_timezone(self.timezone).strftime('%Y%m%d'),
-            'end': self.end.in_timezone(self.timezone).strftime('%Y%m%d'),
+            'start': self.start.strftime('%Y%m%d'),
+            'end': self.end.strftime('%Y%m%d'),
             'period': self.period,
         }
         # TODO: add self.overrides if defined
@@ -408,6 +498,7 @@ class HistoricalDataRequest(BaseRequest):
                 self.security_errors.append(self.parser.as_security_error(element.getElement(Name.SECURITY_ERROR), ticker))
             else:
                 self.on_security_data_element(element)
+                self.field_errors.extend(self.parser.get_field_errors(element))
 
 
 class ReferenceDataResponse(BaseResponse):
@@ -448,7 +539,6 @@ class ReferenceDataRequest(BaseRequest):
         timezone: str = LCL.name,
         force_string=False,
         time_as_datetime=False,
-        include_ticker_field=False,
         **overrides,
     ):
         """response_type: (df, map) how to return the results"""
@@ -470,7 +560,6 @@ class ReferenceDataRequest(BaseRequest):
             time_as_datetime=time_as_datetime,
             decimal_places=decimal_places,
             field_parse_custom=field_parse_custom,
-            include_ticker_field=include_ticker_field,
         )
         self.overrides = overrides
 
@@ -821,7 +910,7 @@ class EQSRequest(BaseRequest):
         for message in self.parser.message_iter(event):
             data = message.getElement('data')
             security = data.getElement(Name.SECURITY_DATA)
-            for element, error in self.parser.security_iter(security):
+            for element, error in self.parser.security_element_iter(security):
                 if error:
                     self.security_errors.append(error)
                     continue
@@ -1311,22 +1400,40 @@ class Blp(metaclass=PostInitCaller):
         field_parse_custom: dict | None = None,
         raise_security_error=False,
         raise_field_error=False,
-        include_ticker_field=False,
+        force_string=False,
+        time_as_datetime=False,
         **overrides
     ) -> ReferenceDataResponse:
         """Equivalent of Excel BDP Request.
 
         Parameters
         ----------
-        tickers :
-        flds :
-        raise_security_error :
-        raise_field_error :
+        tickers : str or list[str]
+            Bloomberg security identifier(s).
+        flds : str or list[str]
+            Bloomberg field name(s).
+        timezone : str
+            Zone for datetime and time values in the response.
+        decimal_places : int, optional
+            Digits kept when force_string formats a number.
+        field_parse_custom : dict, optional
+            Field name to a function that takes the raw blpapi element.
+        raise_security_error : bool, default False
+            Raise RequestSecurityError for an invalid ticker.
+        raise_field_error : bool, default False
+            Raise RequestFieldError for an invalid field.
+        force_string : bool, default False
+            Return every value as a string, and a bulk field as JSON.
+        time_as_datetime : bool, default False
+            Return a time-only value as a datetime dated with this host's
+            date.
+        **overrides
+            Bloomberg field overrides, field id to value. A keyword this
+            method does not name goes to Bloomberg as an override.
 
         Returns
         -------
         ReferenceDataResponse
-
         """
         req = ReferenceDataRequest(
             tickers,
@@ -1336,7 +1443,8 @@ class Blp(metaclass=PostInitCaller):
             field_parse_custom=field_parse_custom,
             raise_security_error=raise_security_error,
             raise_field_error=raise_field_error,
-            include_ticker_field=False,
+            force_string=force_string,
+            time_as_datetime=time_as_datetime,
             **overrides,
         )
         return self.execute(req)

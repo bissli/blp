@@ -3,6 +3,7 @@ import datetime
 import json
 import logging
 from collections import namedtuple
+from collections.abc import Iterator
 from typing import Any
 
 import blpapi
@@ -44,6 +45,11 @@ NUMERIC_TYPES = (
 CLOCK_SKEW_ALLOWANCE = datetime.timedelta(hours=1)
 
 
+class ResponseError(Exception):
+    """Bloomberg answered a request with a responseError element.
+    """
+
+
 class Parser:
     """Interpreter class for Bloomberg Events
 
@@ -57,14 +63,12 @@ class Parser:
         desired_timezone: Timezone = LCL,
         decimal_places: int = None,
         time_as_datetime: bool = False,
-        include_ticker_field=False,
         field_parse_custom: dict | None = None
 
     ):
         self.assumed_timezone = assumed_timezone or UTC
         self.desired_timezone = desired_timezone or LCL
         self.time_as_datetime = time_as_datetime
-        self.include_ticker_field = include_ticker_field
         self.decimal_places = decimal_places
         self.field_parse_custom = field_parse_custom or {}
 
@@ -90,12 +94,25 @@ class Parser:
         yield from elements.values() if elements.isArray() else []
 
     @staticmethod
-    def message_iter(event):
-        """Provide a message iterator which checks for a response error prior to returning.
+    def message_iter(event: blpapi.Event) -> Iterator[blpapi.Message]:
+        """Each message of event, in order.
+
+        Parameters
+        ----------
+        event : blpapi.Event
+
+        Returns
+        -------
+        Iterator[blpapi.Message]
+
+        Raises
+        ------
+        ResponseError
+            At the first message that holds a responseError element.
         """
         for message in event:
             if Name.RESPONSE_ERROR in message:
-                raise Exception(f'REQUEST FAILED: {str(message[Name.RESPONSE_ERROR])}')
+                raise ResponseError(f'REQUEST FAILED: {str(message[Name.RESPONSE_ERROR])}')
             yield message
 
     #
@@ -264,9 +281,6 @@ class Parser:
             ]
         cols = list(dict.fromkeys(name for row in rows for name in row))
         data = {name: [row.get(name) for row in rows] for name in cols}
-        if self.include_ticker_field:
-            data['ticker'] = None
-            data['field'] = None
         return pd.DataFrame(data, columns=cols)
 
     def _sequence_as_json(self, elements: blpapi.Element) -> str:
