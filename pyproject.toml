@@ -21,11 +21,15 @@ libb-util = ">=0.0.61"
 # == test
 asserts = { version = "*", optional = true }
 pytest = { version = "*", optional = true }
+natsort = { version = "*", optional = true }
+prettytable = { version = "*", optional = true }
 
 [tool.poetry.extras]
 test = [
   "asserts",
   "pytest",
+  "natsort",
+  "prettytable",
 ]
 
 [[tool.poetry.source]]
