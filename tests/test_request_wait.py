@@ -72,9 +72,10 @@ class FakeClock:
         return event
 
 
-def run_request(clock: FakeClock) -> MagicMock:
+def run_request(clock: FakeClock, **blp_kwargs) -> MagicMock:
     """Run Blp.execute on a mock session timed by clock; return the mock
-    request so a test can read its process_response calls.
+    request so a test can read its process_response calls. blp_kwargs go
+    to the Blp constructor.
     """
     session = MagicMock()
     session.sendRequest.return_value = OWN_ID
@@ -85,7 +86,7 @@ def run_request(clock: FakeClock) -> MagicMock:
     fake_time = MagicMock()
     fake_time.monotonic.side_effect = lambda: clock.now
     with patch.object(blp.client, 'time', fake_time):
-        Blp(session=session, skip_test=True).execute(request)
+        Blp(session=session, skip_test=True, **blp_kwargs).execute(request)
     return request
 
 
@@ -116,6 +117,74 @@ def test_partial_response_restarts_idle_limit():
     request = run_request(clock)
     calls = request.process_response.call_args_list
     assert [call.kwargs['is_final'] for call in calls] == [False, True]
+
+
+def steady_partials(until: int) -> list[tuple]:
+    """A partial every 5 s from 5 s through until, then a RESPONSE 5 s
+    later, so the stream never goes 5 s without data.
+    """
+    schedule = [
+        (second, make_response_event(Event.PARTIAL_RESPONSE, OWN_ID))
+        for second in range(5, until + 1, 5)
+        ]
+    schedule.append((until + 5, make_response_event(Event.RESPONSE, OWN_ID)))
+    return schedule
+
+
+def test_total_limit_ends_steady_partial_stream():
+    """Verify total_seconds ends a request whose partials never go idle.
+
+    Mutation: the total deadline dropped, or restarted on each partial.
+    Oracle: partials every 5 s against idle_seconds=8; the raise comes at
+        20.5 s, the first 0.5 s tick past total_seconds=20.
+    """
+    clock = FakeClock(steady_partials(100))
+    with pytest.raises(RequestTimeoutError, match='total limit of 20 s'):
+        run_request(clock, idle_seconds=8, total_seconds=20)
+    assert clock.now == 20.5
+
+
+def test_no_total_limit_lets_steady_stream_finish():
+    """Verify total_seconds=None lets the same partial stream reach its
+    RESPONSE.
+
+    Mutation: None read as a zero or finite total limit.
+    Oracle: the RESPONSE at 105 s, five times past a 20 s total, with no
+        gap over 5 s against idle_seconds=8.
+    """
+    clock = FakeClock(steady_partials(100))
+    request = run_request(clock, idle_seconds=8, total_seconds=None)
+    calls = request.process_response.call_args_list
+    assert [call.kwargs['is_final'] for call in calls] == [False] * 20 + [True]
+
+
+def test_idle_limit_raises_and_partial_restarts_it():
+    """Verify an idle gap past idle_seconds raises, timed from the last
+    partial.
+
+    Mutation: idle_seconds ignored for the 120 s constant, the idle clock
+        not restarted on a partial, or the gap reported as the total limit.
+    Oracle: a partial at 3 s and nothing after; the raise comes at 11.5 s,
+        the first tick past 3 + 8. No restart would raise at 8.5 s.
+    """
+    clock = FakeClock([(3, make_response_event(Event.PARTIAL_RESPONSE, OWN_ID))])
+    with pytest.raises(RequestTimeoutError, match='idle limit of 8 s'):
+        run_request(clock, idle_seconds=8, total_seconds=20)
+    assert clock.now == 11.5
+
+
+def test_silent_server_raises_at_set_idle_limit():
+    """Verify idle_seconds sets the first deadline for a request that gets
+    no data at all.
+
+    Mutation: the starting deadline built from the 120 s constant.
+    Oracle: an empty schedule with idle_seconds=8 raises at 8.5 s, the
+        first tick past 8, ahead of the 20 s total.
+    """
+    clock = FakeClock([])
+    with pytest.raises(RequestTimeoutError, match='idle limit of 8 s'):
+        run_request(clock, idle_seconds=8, total_seconds=20)
+    assert clock.now == 8.5
 
 
 def test_stale_partial_does_not_restart_idle_limit():

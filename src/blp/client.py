@@ -165,7 +165,7 @@ class SubscriptionDeadError(SessionError):
 
 
 class RequestTimeoutError(SessionError):
-    """A request got no data from Bloomberg for REQUEST_IDLE_SECONDS.
+    """A request passed its Blp idle_seconds or total_seconds limit.
     """
 
 
@@ -1186,6 +1186,25 @@ class PostInitCaller(type):
 class Blp(metaclass=PostInitCaller):
     """Submits requests to the Bloomberg API and dispatches the events back to the request
     object for processing.
+
+    Parameters
+    ----------
+    host : str, default 'localhost'
+    port : int, default 8194
+    auth : str, default 'AuthenticationType=OS_LOGON'
+        Session authentication options.
+    application_identity_key : str, optional
+    session : blpapi.Session, optional
+        A started session to use. Blp leaves a caller's session running
+        when the connectivity test fails. None creates one.
+    skip_test : bool, default False
+        Skip the connectivity test request at construction.
+    idle_seconds : float, default REQUEST_IDLE_SECONDS
+        Longest wait for a request's next event. Each partial response
+        restarts the count.
+    total_seconds : float, optional
+        Longest wait for a request's full response, counted from the send.
+        Partial responses do not restart it. None sets no limit.
     """
 
     def __init__(self,
@@ -1194,12 +1213,16 @@ class Blp(metaclass=PostInitCaller):
                  auth='AuthenticationType=OS_LOGON',
                  application_identity_key=None,
                  session=None,
-                 skip_test=False):
+                 skip_test=False,
+                 idle_seconds: float = REQUEST_IDLE_SECONDS,
+                 total_seconds: float | None = None):
         self.host = host
         self.port = port
         self.auth = auth
         self.application_identity_key = application_identity_key
         self.skip_test = skip_test
+        self.idle_seconds = idle_seconds
+        self.total_seconds = total_seconds
         self._owns_session = session is None
         self.session = session or SessionFactory.create(
             host=host,
@@ -1259,8 +1282,10 @@ class Blp(metaclass=PostInitCaller):
         Raises
         ------
         RequestTimeoutError
-            Bloomberg sent nothing for the request for REQUEST_IDLE_SECONDS.
-            Each partial response restarts the count.
+            Bloomberg sent nothing for the request for idle_seconds, where
+            each partial response restarts the count, or the full response
+            took longer than total_seconds after the send. The message
+            names the limit and its value.
         SessionNotAvailableError
             The session is not started, or Bloomberg failed the request
             with a category in SESSION_FAILURE_CATEGORIES.
@@ -1305,16 +1330,27 @@ class Blp(metaclass=PostInitCaller):
         Raises
         ------
         RequestTimeoutError
+            The idle_seconds or total_seconds limit passed, as in execute.
         SessionNotAvailableError
         SessionTerminatedError
         RuntimeError
             As listed in execute.
         """
-        deadline = time.monotonic() + REQUEST_IDLE_SECONDS
+        sent_at = time.monotonic()
+        idle_deadline = sent_at + self.idle_seconds
+        total_deadline = None
+        if self.total_seconds is not None:
+            total_deadline = sent_at + self.total_seconds
         while True:
-            if time.monotonic() > deadline:
+            now = time.monotonic()
+            if now > idle_deadline:
                 raise RequestTimeoutError(
-                    f'No data for {request!r} within {REQUEST_IDLE_SECONDS} s')
+                    f'No data for {request!r} within the idle limit'
+                    f' of {self.idle_seconds} s')
+            if total_deadline is not None and now > total_deadline:
+                raise RequestTimeoutError(
+                    f'No full response for {request!r} within the total limit'
+                    f' of {self.total_seconds} s')
             # A short wait keeps Ctrl-C and the deadline check responsive.
             event = self.session.nextEvent(500)
             event_type = event.eventType()
@@ -1331,7 +1367,7 @@ class Blp(metaclass=PostInitCaller):
                 case Event.PARTIAL_RESPONSE:
                     logger.debug('Processing PARTIAL_RESPONSE ...')
                     request.process_response(event, is_final=False)
-                    deadline = time.monotonic() + REQUEST_IDLE_SECONDS
+                    idle_deadline = time.monotonic() + self.idle_seconds
                 case Event.REQUEST_STATUS:
                     message = next(
                         msg for msg in event if correlation_id in msg.correlationIds())
