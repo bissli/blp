@@ -3,21 +3,25 @@ See HistoricalDataResponse
 """
 import atexit
 import contextlib
+import dataclasses
 import datetime
+import itertools
 import json
 import logging
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import blpapi
 import pandas as pd
 from blpapi.event import Event
 from opendate import LCL, UTC, Date, DateTime, Timezone
 
-from blp.handle import BaseEventHandler, DefaultEventHandler
-from blp.parse import Name, Parser, ResponseError
+from blp.parse import Name, Parser, ResponseError, SubscriptionParser
 from libb import is_null
 
 try:
@@ -59,7 +63,8 @@ __all__ = [
     'BQLResponse',
     # Subscription
     'Subscription',
-    'SubscriptionDeadError',
+    'SubscriptionStatus',
+    'TopicState',
 ]
 
 
@@ -139,6 +144,12 @@ def calendar_date(value: datetime.date | str) -> Date:
     return date
 
 
+def is_not_started(exc: blpapi.Exception) -> bool:
+    """True for the error blpapi raises on a session that is not started.
+    """
+    return 'Session Not Started' in str(exc) or type(exc).__name__ == 'InvalidStateException'
+
+
 class SessionError(RuntimeError):
     pass
 
@@ -159,11 +170,6 @@ class SessionNotAvailableError(SessionError):
     """No usable Bloomberg session on this host (e.g. terminal not logged in)."""
 
 
-class SubscriptionDeadError(SessionError):
-    """A running subscription can no longer deliver data.
-    """
-
-
 class RequestTimeoutError(SessionError):
     """A request passed its Blp idle_seconds or total_seconds limit.
     """
@@ -180,6 +186,8 @@ class RequestFieldError(Exception):
 
 
 REQUEST_IDLE_SECONDS = 120
+FIRST_DATA_SECONDS = 60
+TICK_WINDOW_SECONDS = 60
 SESSION_FAILURE_CATEGORIES = {'CONNECTION_DEAD', 'SERVICE_NOT_AVAILABLE'}
 REQUEST_EVENT_TYPES = {Event.RESPONSE, Event.PARTIAL_RESPONSE, Event.REQUEST_STATUS}
 
@@ -624,7 +632,7 @@ class IntradayTickResponse(BaseResponse):
 
 
 class IntradayTickRequest(BaseRequest):
-    """Intraday tick request. Can submit to MSG1 as well for bond runs.
+    """Intraday tick request.
     Note: returns UTC datetime by default.
     """
     def __init__(
@@ -1302,7 +1310,7 @@ class Blp(metaclass=PostInitCaller):
             _request = request.create_request(service)
             correlation_id = self.session.sendRequest(_request)
         except blpapi.Exception as exc:
-            if 'Session Not Started' in str(exc) or type(exc).__name__ == 'InvalidStateException':
+            if is_not_started(exc):
                 raise SessionNotAvailableError(str(exc)) from exc
             raise
         request.prepare_response()
@@ -1632,156 +1640,442 @@ class Blp(metaclass=PostInitCaller):
         )
         return self.execute(req)
 
-    def subscribe(
-        self,
-        topics,
-        fields,
-        interval=0,
-        dispatcher=None,
-        runtime=24*60*60,
-        handler=DefaultEventHandler,
-        shutdown_event: threading.Event = None,
-        **kwargs
-    ) -> BaseEventHandler:
-        """Create subscription request and return the handler instance for data access.
-        """
-        sub = Subscription(
-            topics=topics,
-            fields=fields,
-            interval=interval,
-            host=self.host,
-            port=self.port,
-            auth=self.auth,
-            application_identity_key=self.application_identity_key,
-            dispatcher=dispatcher,
-        )
-        return sub.subscribe(runtime=runtime, handler=handler, shutdown_event=shutdown_event, **kwargs)
+
+@dataclass
+class TopicState:
+    """One topic's state, as Subscription.status() copies it.
+
+    Attributes
+    ----------
+    topic : str
+    status : str
+        'pending' until Bloomberg answers the subscribe, then 'subscribed'
+        on SubscriptionStarted, or 'failed' on SubscriptionFailure or on a
+        SubscriptionTerminated that remove() did not cause.
+    reason : str or None
+        Bloomberg's description, for a failed topic.
+    subscribed_at : DateTime or None
+        UTC time of SubscriptionStarted.
+    first_data_at : DateTime or None
+        UTC time of the first tick, which is the initial snapshot.
+    last_tick_at : DateTime or None
+        UTC time of the latest tick.
+    ticks_last_minute : int
+        Ticks received less than TICK_WINDOW_SECONDS before the status()
+        call.
+    """
+
+    topic: str
+    status: str = 'pending'
+    reason: str | None = None
+    subscribed_at: DateTime | None = None
+    first_data_at: DateTime | None = None
+    last_tick_at: DateTime | None = None
+    ticks_last_minute: int = 0
+
+
+@dataclass
+class SubscriptionStatus:
+    """A consistent copy of a Subscription's state.
+
+    Attributes
+    ----------
+    failure : str or None
+        Why the subscription can no longer deliver data, in this order: the
+        session terminated outside stop(), every held topic failed, or no
+        topic ticked within FIRST_DATA_SECONDS of the first add(). None
+        while it can. The owner replaces a failed subscription.
+    connected : bool
+        False between SessionConnectionDown and SessionConnectionUp, while
+        blpapi tries to reconnect.
+    error_cnt : int
+        Exceptions caught on the dispatcher thread, from parsing or on_tick.
+    last_error : str or None
+        'topic: repr(exception)' of the latest one.
+    topics : dict[str, TopicState]
+        Held topics, in add order.
+    """
+
+    failure: str | None
+    connected: bool
+    error_cnt: int
+    last_error: str | None
+    topics: dict[str, TopicState]
 
 
 class Subscription:
-    """
-    Fields: Bloomberg will always return all subscribable fields in reach response.
-        What `fields` does is specify which fields (when they change) should trigger an event.
-        Internally though our event handler will filter for the fields we request.
+    """Live market data subscription on its own asynchronous session.
+
+    Parameters
+    ----------
+    fields : str or list[str]
+        Fields whose changes raise a tick, such as ['BID', 'ASK']. A row
+        holds the ones present in the message.
+    on_tick : Callable[[str, dict[str, Any]], None]
+        Called with (topic, {field: value}) for each tick, on the
+        dispatcher thread, with no lock held, so it may call add, remove,
+        status or stop. Subscription catches and counts what it raises.
+    interval : float, default 0
+        Seconds between conflated updates. 0 leaves it unset.
+    host, port, auth, application_identity_key
+        Session settings, passed to SessionFactory.create.
+    assumed_timezone : Timezone, default LCL
+        Zone of the times Bloomberg sends, which is the Terminal's zone.
+    desired_timezone : Timezone, default LCL
+        Zone of the times in a row.
+    time_as_datetime : bool, default False
+        Return a time-only value as a datetime.
+
+    Raises
+    ------
+    SessionCreateError
+        The session failed to start.
+    SessionStartError
+        //blp/mktdata failed to open. The session is cleaned up first.
+
+    Notes
+    -----
+    - Every method is safe from any thread. stop() is the only way to
+      release the session, and an instance left unstopped lives until the
+      process exits.
     """
 
     def __init__(
         self,
-        topics,
-        fields,
-        interval=0,
-        host='localhost',
-        port=8194,
-        auth='AuthenticationType=OS_LOGON',
-        application_identity_key=None,
-        dispatcher=None,
-    ):
-        """Store the topics, fields and session settings.
+        fields: str | list[str],
+        on_tick: Callable[[str, dict[str, Any]], None],
+        interval: float = 0,
+        host: str = 'localhost',
+        port: int = 8194,
+        auth: str = 'AuthenticationType=OS_LOGON',
+        application_identity_key: str | None = None,
+        assumed_timezone: Timezone = LCL,
+        desired_timezone: Timezone = LCL,
+        time_as_datetime: bool = False) -> None:
+        self.fields = [fields] if isinstance(fields, str) else list(fields)
+        self.on_tick = on_tick
+        self.interval = interval
+        self.parser = SubscriptionParser(
+            assumed_timezone=assumed_timezone,
+            desired_timezone=desired_timezone,
+            time_as_datetime=time_as_datetime)
+        self._lock = threading.Lock()
+        self._terminated = threading.Event()
+        self._cids = itertools.count(1)
+        self._states: dict[str, TopicState] = {}
+        self._tick_times: dict[str, deque[float]] = {}
+        self._cid_by_topic: dict[str, int] = {}
+        self._topic_by_cid: dict[int, str] = {}
+        self._first_add_at: float | None = None
+        self._first_data_at: float | None = None
+        self._session_failure: str | None = None
+        self._connected = True
+        self._error_cnt = 0
+        self._last_error: str | None = None
+        self._stopping = False
+        self._cleaned = False
+        self._dispatch_thread_id: int | None = None
+        self.session = SessionFactory.create(
+            host=host,
+            port=port,
+            auth=auth,
+            application_identity_key=application_identity_key,
+            event_handler=self._on_event)
+        try:
+            self.session.open_service('//blp/mktdata')
+        except Exception:
+            self.session.cleanup()
+            raise
+
+    def __enter__(self) -> 'Subscription':  # noqa: PYI034
+        return self
+
+    def __exit__(self, exc_ty: type | None, exc_val: BaseException | None, tb: Any) -> None:
+        self.stop()
+
+    def add(self, topics: str | list[str]) -> None:
+        """Subscribe topics on the live session.
 
         Parameters
         ----------
         topics : str or list[str]
-            Securities such as 'IBM US Equity', or custom Bloomberg
-            mnemonics such as @MSG1 topics.
-        fields : str or list[str]
-            Fields whose changes raise an event, such as ['BID', 'ASK'].
-        interval : float, default 0
-            Seconds between conflated updates. 0 leaves it unset.
-        host, port, auth, application_identity_key
-            Session settings, passed to SessionFactory.create.
-        dispatcher : blpapi.EventDispatcher, optional
-            None uses blpapi's own single-thread dispatch.
-        """
-        self.fields = [fields] if isinstance(fields, str) else fields
-        self.topics = [topics] if isinstance(topics, str) else topics
-        self.interval = interval
-        self.host = host
-        self.port = port
-        self.auth = auth
-        self.application_identity_key = application_identity_key
-        self.dispatcher = dispatcher
-
-    def subscribe(
-        self,
-        handler: BaseEventHandler,
-        runtime=24 * 60 * 60,
-        shutdown_event: threading.Event = None,
-        **kwargs
-    ) -> BaseEventHandler:
-        """Run the subscription for runtime seconds and return the handler.
-
-        Parameters
-        ----------
-        handler : type[BaseEventHandler]
-            Handler class. It is built here from topics, fields and kwargs.
-        runtime : float, default 86400
-            Seconds to run. 0 or less unsubscribes at once.
-        shutdown_event : threading.Event, optional
-            Setting it ends the subscription early.
-        **kwargs
-            Passed to the handler: assumed_timezone, desired_timezone and
-            time_as_datetime.
-
-        Returns
-        -------
-        BaseEventHandler
-            The handler, holding what it collected.
+            A held topic is skipped, except a failed one, which is
+            subscribed again.
 
         Raises
         ------
-        SubscriptionDeadError
-            The session terminated, every topic failed or was terminated,
-            or no data arrived for any topic within 60 s of subscribing.
-            Data that stops later in the run never raises.
+        SessionError
+            stop() has begun.
+        SessionNotAvailableError
+            The session is not started. No topic of the call is held.
+        """
+        topics = [topics] if isinstance(topics, str) else topics
+        options = {'interval': f'{self.interval:.1f}'} if self.interval else {}
+        with self._lock:
+            if self._stopping:
+                raise SessionError('Subscription is stopped')
+            new_topics = [
+                topic for topic in dict.fromkeys(topics)
+                if topic not in self._states or self._states[topic].status == 'failed'
+                ]
+            if not new_topics:
+                return
+            prior_by_topic = {
+                topic: (self._cid_by_topic[topic], self._states[topic], self._tick_times[topic])
+                for topic in new_topics if topic in self._states
+                }
+            subscriptions = blpapi.SubscriptionList()
+            for topic in new_topics:
+                self._topic_by_cid.pop(self._cid_by_topic.get(topic), None)
+                cid = next(self._cids)
+                self._cid_by_topic[topic] = cid
+                self._topic_by_cid[cid] = topic
+                self._states[topic] = TopicState(topic)
+                self._tick_times[topic] = deque()
+                subscriptions.add(topic, self.fields, options, blpapi.CorrelationId(cid))
+            try:
+                self.session.subscribe(subscriptions)
+            except blpapi.Exception as exc:
+                for topic in new_topics:
+                    del self._topic_by_cid[self._cid_by_topic.pop(topic)]
+                    del self._states[topic]
+                    del self._tick_times[topic]
+                for topic, (cid, state, ticks) in prior_by_topic.items():
+                    self._cid_by_topic[topic] = cid
+                    self._topic_by_cid[cid] = topic
+                    self._states[topic] = state
+                    self._tick_times[topic] = ticks
+                if is_not_started(exc):
+                    raise SessionNotAvailableError(str(exc)) from exc
+                raise
+            if self._first_add_at is None:
+                self._first_add_at = time.monotonic()
+        logger.info(f'Subscribed {len(new_topics)} topics')
+
+    def remove(self, topics: str | list[str]) -> None:
+        """Unsubscribe topics and stop tracking them. Unknown topics are
+        skipped.
+
+        Parameters
+        ----------
+        topics : str or list[str]
+
+        Raises
+        ------
+        SessionNotAvailableError
+            The session is not started. The topics are dropped all the same.
+        """
+        topics = [topics] if isinstance(topics, str) else topics
+        with self._lock:
+            held_topics = [topic for topic in dict.fromkeys(topics) if topic in self._states]
+            if not held_topics:
+                return
+            subscriptions = blpapi.SubscriptionList()
+            for topic in held_topics:
+                cid = self._cid_by_topic.pop(topic)
+                # Dropping the mapping first makes the unsubscribe's own
+                # SubscriptionTerminated, and any late tick, unknown.
+                self._topic_by_cid.pop(cid, None)
+                del self._states[topic]
+                del self._tick_times[topic]
+                subscriptions.add(None, correlationId=blpapi.CorrelationId(cid))
+            if self._stopping:
+                return
+            try:
+                self.session.unsubscribe(subscriptions)
+            except blpapi.Exception as exc:
+                if is_not_started(exc):
+                    raise SessionNotAvailableError(str(exc)) from exc
+                raise
+        logger.info(f'Unsubscribed {len(held_topics)} topics')
+
+    def status(self) -> SubscriptionStatus:
+        """A consistent copy of the subscription's state, as of now.
+        """
+        now = time.monotonic()
+        with self._lock:
+            topics = {}
+            for topic, state in self._states.items():
+                ticks = self._tick_times[topic]
+                while ticks and now - ticks[0] >= TICK_WINDOW_SECONDS:
+                    ticks.popleft()
+                topics[topic] = dataclasses.replace(state, ticks_last_minute=len(ticks))
+            failure = self._session_failure
+            failed_ds = [state for state in topics.values() if state.status == 'failed']
+            if not failure and not self._stopping and topics and len(failed_ds) == len(topics):
+                failure = f'all {len(failed_ds)} topics failed: {failed_ds[0].reason}'
+            if not failure and not self._stopping and self._first_add_at is not None:
+                data_at = now if self._first_data_at is None else self._first_data_at
+                if data_at - self._first_add_at >= FIRST_DATA_SECONDS:
+                    failure = f'no subscription data within {FIRST_DATA_SECONDS} s'
+            return SubscriptionStatus(
+                failure=failure,
+                connected=self._connected,
+                error_cnt=self._error_cnt,
+                last_error=self._last_error,
+                topics=topics)
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """Unsubscribe everything and release the session.
+
+        Parameters
+        ----------
+        timeout : float, default 10.0
+            Longest wait, in seconds, for the session to terminate.
 
         Notes
         -----
-        - Bloomberg sends subscription times in the terminal's time zone.
-          The handler assumes this machine's zone unless assumed_timezone
-          says otherwise.
+        - Called from on_tick, it begins the stop and returns at once. A
+          later call from another thread, or after a timeout, waits again
+          and releases the session. status() still reads the last state.
         """
-        _handler = handler(self.topics, self.fields, **kwargs)
-        session = SessionFactory.create(
-            host=self.host,
-            port=self.port,
-            auth=self.auth,
-            event_handler=_handler,
-            event_dispatcher=self.dispatcher,
-            application_identity_key=self.application_identity_key,
-        )
-        subscriptions = blpapi.SubscriptionList()
-        options = {'interval': f'{self.interval:.1f}'} if self.interval else {}
-        for topic in self.topics:
-            subscriptions.add(topic, self.fields, options, blpapi.CorrelationId(topic))
+        with self._lock:
+            if not self._stopping:
+                self._stopping = True
+                subscriptions = blpapi.SubscriptionList()
+                for cid in self._topic_by_cid:
+                    subscriptions.add(None, correlationId=blpapi.CorrelationId(cid))
+                self._topic_by_cid.clear()
+                try:
+                    if subscriptions.size():
+                        self.session.unsubscribe(subscriptions)
+                except blpapi.Exception as exc:
+                    logger.warning(f'Could not unsubscribe cleanly: {exc}')
+                try:
+                    self.session.stopAsync()
+                except blpapi.Exception as exc:
+                    logger.warning(f'Could not stop session: {exc}')
+        if threading.get_ident() == self._dispatch_thread_id:
+            return
+        if not self._terminated.wait(timeout):
+            logger.warning(f'Bloomberg session did not stop within {timeout} s')
+            # Session.cleanup joins the dispatcher thread with no limit,
+            # which would hang interpreter exit.
+            atexit.unregister(self.session.cleanup)
+            return
+        with self._lock:
+            if self._cleaned:
+                return
+            self._cleaned = True
+        self.session.cleanup()
 
+    def _on_event(self, event: blpapi.Event, session: blpapi.Session) -> None:
+        """Blpapi's event handler, on the dispatcher thread. Never raises.
+        """
+        # blpapi ends the process with os._exit(1) when a handler raises,
+        # so this guard catches BaseException.
         try:
-            session.open_service('//blp/mktdata')
-            logger.info('Starting subscription...')
-            session.subscribe(subscriptions)
-            subscribed_at = time.monotonic()
+            self._dispatch_thread_id = threading.get_ident()
+            match event.eventType():
+                case Event.SUBSCRIPTION_DATA:
+                    self._on_data_event(event)
+                case Event.SUBSCRIPTION_STATUS:
+                    self._on_status_event(event)
+                case Event.TIMEOUT:
+                    return
+                case _:
+                    self._on_other_event(event)
+        except BaseException as exc:
+            self._record_error('', exc)
 
-            shutdown_event = shutdown_event or threading.Event()
-            deadline = subscribed_at + float(runtime)
-            while (remaining := deadline - time.monotonic()) > 0:
-                # The one-second cap keeps Ctrl-C working on Windows, where
-                # a lock wait ignores it.
-                if shutdown_event.wait(timeout=min(remaining, 1.0)):
-                    logger.info('Shutdown event detected, ending subscription')
-                    break
-                if _handler.failure:
-                    raise SubscriptionDeadError(_handler.failure)
-                if not _handler.first_data and time.monotonic() - subscribed_at >= 60:
-                    raise SubscriptionDeadError('no subscription data within 60 s')
-        except blpapi.Exception as exc:
-            if 'Session Not Started' in str(exc) or type(exc).__name__ == 'InvalidStateException':
-                raise SessionNotAvailableError(str(exc)) from exc
-            raise
-        finally:
-            logger.info('Ending subscription...')
+    def _on_data_event(self, event: blpapi.Event) -> None:
+        """Record each message's tick, then pass its row to on_tick.
+        """
+        for message in event:
+            now_mono, now = time.monotonic(), DateTime.now(UTC)
+            with self._lock:
+                topic = self._topic_by_cid.get(message.correlationId().value())
+                if topic is None:
+                    continue
+                state = self._states[topic]
+                state.first_data_at = state.first_data_at or now
+                state.last_tick_at = now
+                ticks = self._tick_times[topic]
+                ticks.append(now_mono)
+                while now_mono - ticks[0] >= TICK_WINDOW_SECONDS:
+                    ticks.popleft()
+                if self._first_data_at is None:
+                    self._first_data_at = now_mono
             try:
-                session.unsubscribe(subscriptions)
-            except Exception as exc:
-                logger.warning(f'Could not end subscription cleanly: {exc}')
-            session.cleanup()
+                row = {
+                    field: self.parser.get_subelement_value(message, field.upper())
+                    for field in self.fields
+                    if field.upper() in message
+                    }
+                self.on_tick(topic, row)
+            except BaseException as exc:
+                self._record_error(topic, exc)
 
-        return _handler
+    def _on_status_event(self, event: blpapi.Event) -> None:
+        """Mark topics subscribed or failed.
+        """
+        for message in event:
+            match message.messageType():
+                case blpapi.Names.SUBSCRIPTION_STARTED:
+                    started = True
+                case blpapi.Names.SUBSCRIPTION_FAILURE | blpapi.Names.SUBSCRIPTION_TERMINATED:
+                    started = False
+                case _:
+                    continue
+            desc = None
+            if not started:
+                desc = 'no description'
+                reason = message.getElement('reason')
+                if reason.hasElement('description'):
+                    desc = reason.getElementAsString('description')
+            with self._lock:
+                topic = self._topic_by_cid.get(message.correlationId().value())
+                if topic is None:
+                    continue
+                state = self._states[topic]
+                if started:
+                    state.status = 'subscribed'
+                    state.subscribed_at = DateTime.now(UTC)
+                else:
+                    state.status = 'failed'
+                    state.reason = desc
+            if not started:
+                logger.error(f'Subscription {message.messageType()} topic={topic} desc={desc}')
+
+    def _on_other_event(self, event: blpapi.Event) -> None:
+        """Track session termination and connection, and log queue warnings.
+        """
+        for message in event:
+            match message.messageType():
+                case blpapi.Names.SESSION_TERMINATED:
+                    with self._lock:
+                        if not self._stopping:
+                            self._session_failure = 'session terminated'
+                    # INFO, since every clean stop() delivers one.
+                    logger.info('Bloomberg session terminated')
+                    # No callback follows SessionTerminated, and the
+                    # dispatcher thread's id may be reused once it exits.
+                    self._dispatch_thread_id = None
+                    self._terminated.set()
+                case blpapi.Names.SESSION_CONNECTION_DOWN:
+                    with self._lock:
+                        self._connected = False
+                    logger.warning('Bloomberg connection down')
+                case blpapi.Names.SESSION_CONNECTION_UP:
+                    with self._lock:
+                        self._connected = True
+                    logger.info('Bloomberg connection up')
+                case blpapi.Names.SLOW_CONSUMER_WARNING:
+                    logger.warning('Event queue nearly full; ticks may be dropped')
+                case blpapi.Names.SLOW_CONSUMER_WARNING_CLEARED:
+                    logger.warning('Event queue no longer nearly full')
+                case blpapi.Names.DATA_LOSS:
+                    logger.warning(f'Event queue overflowed, data lost: {message}')
+
+    def _record_error(self, topic: str, exc: BaseException) -> None:
+        """Count exc and keep it as last_error. Only the first is logged
+        with its traceback, since a broken on_tick fails on every tick.
+        """
+        with self._lock:
+            self._error_cnt += 1
+            self._last_error = f'{topic}: {exc!r}'
+            first = self._error_cnt == 1
+        if first:
+            logger.error(f'Subscription error on {topic!r}', exc_info=exc)
+        else:
+            logger.debug(f'Subscription error on {topic!r}: {exc!r}')

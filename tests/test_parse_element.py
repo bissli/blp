@@ -8,7 +8,6 @@ from blpapi.datatype import DataType
 from dateutil.tz import gettz
 from opendate import UTC, Date, DateTime, Timezone
 
-from blp.handle import LoggingEventHandler
 from blp.parse import Parser, SubscriptionParser
 
 
@@ -139,16 +138,6 @@ def test_time_only_as_time_in_desired_timezone():
     stamp = DateTime(2026, 10, 31, 21, 40, 51, tzinfo=NEW_YORK)
     result = parse_time_only(SubscriptionParser, stamp, FALL_BACK_MORNING, UTC, False)
     assert result.replace(tzinfo=None) == datetime.time(21, 40, 51)
-
-
-def test_event_handler_parses_with_subscription_parser():
-    """Verify a subscription handler parses with SubscriptionParser.
-
-    Mutation: BaseEventHandler builds a plain Parser.
-    Oracle: the class of the handler's parser.
-    """
-    handler = LoggingEventHandler(['IBM US Equity'], ['TIME'])
-    assert type(handler.parser) is SubscriptionParser
 
 
 @pytest.mark.parametrize('force_string', [True, False])
