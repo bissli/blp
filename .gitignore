@@ -5,3 +5,6 @@ __pycache__/
 .python-version
 activate.ps1
 .root
+tutorials/
+src/blp/proto/
+notebook/FORWARD.md
