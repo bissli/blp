@@ -47,7 +47,32 @@ CLOCK_SKEW_ALLOWANCE = datetime.timedelta(hours=1)
 
 class ResponseError(Exception):
     """Bloomberg answered a request with a responseError element.
+
+    Parameters
+    ----------
+    message : str
+        The exception text.
+    category : str, optional
+        The responseError's category, such as LIMIT. None when the
+        element carries none.
+    subcategory : str, optional
+        The responseError's subcategory. None when the element carries
+        none.
+
+    Attributes
+    ----------
+    category : str or None
+    subcategory : str or None
     """
+
+    def __init__(
+        self,
+        message: str,
+        category: str | None = None,
+        subcategory: str | None = None) -> None:
+        super().__init__(message)
+        self.category = category
+        self.subcategory = subcategory
 
 
 class Parser:
@@ -112,7 +137,15 @@ class Parser:
         """
         for message in event:
             if Name.RESPONSE_ERROR in message:
-                raise ResponseError(f'REQUEST FAILED: {str(message[Name.RESPONSE_ERROR])}')
+                error = message.getElement(Name.RESPONSE_ERROR)
+                category, subcategory = (
+                    error.getElement(name).getValueAsString()
+                    if name in error else None
+                    for name in (Name.CATEGORY, Name.SUBCATEGORY))
+                raise ResponseError(
+                    f'REQUEST FAILED: {str(message[Name.RESPONSE_ERROR])}',
+                    category=category,
+                    subcategory=subcategory)
             yield message
 
     #

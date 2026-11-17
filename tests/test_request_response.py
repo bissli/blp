@@ -165,6 +165,26 @@ def test_response_error_is_typed():
     assert not isinstance(excinfo.value, SessionError)
 
 
+def test_response_error_carries_category():
+    """Verify ResponseError carries the responseError's category fields.
+
+    Mutation: category read from the subcategory element, or either
+        attribute left None when the element holds it.
+    Oracle: the BLPAPI Core Developer Guide's ResponseError row for
+        all requests, category LIMIT and subcategory DAILY_LIMIT_REACHED.
+    """
+    error = make_node('responseError', children=[
+        make_node('category', 'LIMIT'),
+        make_node('subcategory', 'DAILY_LIMIT_REACHED'),
+        ])
+    message = make_node('Response', children=[error])
+    message.__getitem__.return_value = 'LIMIT'
+    with pytest.raises(ResponseError) as excinfo:
+        list(Parser.message_iter(make_event(message)))
+    assert excinfo.value.category == 'LIMIT'
+    assert excinfo.value.subcategory == 'DAILY_LIMIT_REACHED'
+
+
 @pytest.mark.parametrize(('errors', 'record', 'exc_class'), [
     (
         'security_errors',
